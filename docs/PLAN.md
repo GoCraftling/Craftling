@@ -96,14 +96,16 @@ build "deferred" — it is built.)*
     binary at `/.craftling/init`; ensures standard mountpoints; distills the OCI
     config into a `RunSpec`. Output is a content-addressed `<algo>-<hex>.sqsh`.
     Hardened against tar-bombs (≤16 GiB / ~1M entries) and path traversal.
-  - ⚠️ **Integration gap:** this converter is built and unit-tested, but the
-    production `Runtime.Provision` does **not** consume its squashfs output yet.
-    The driver still stages a **writable per-version `.ext4`** copy from a host
-    catalog (`FC_IMAGE_DIR/minecraft-<version>.ext4`, `root=/dev/vda rw`,
-    `runtime.go:148-165`, `config.go:327`). The read-only-squashfs + `cmd/init`
-    + MMDS-runspec path (and the persist/NAT layering on it) is exercised by the
-    KVM e2e tests, but wiring the converter in as the runtime's actual rootfs
-    source is **remaining work** (see Remaining work below).
+  - ✅ **Converter wired in (integration gap closed).** `Runtime.Provision`
+    resolves the server's OCI ref (`Config.ImageRef`, a `{version}` template, or
+    `DefaultImageRef`), pulls + converts it through `image.Store.Ensure`
+    (content-addressed, cached by digest), attaches the resulting squashfs
+    **read-only** as `/dev/vda`, and boots `cmd/init` with `root=/dev/vda ro
+    init=/.craftling/init`. The RunSpec the converter distils is the one
+    published into MMDS (a per-server spec can override command/env/workdir via
+    `applyRunSpecOverride`), so the persist/NAT/quiesce layering now runs on the
+    **production** path, not just the KVM e2e. The writable-`.ext4` catalog and
+    `copyFile` rootfs staging are **retired**.
   - `internal/squashfs` — a **from-scratch squashfs 4.0 writer** (files, dirs,
     symlinks, hardlinks, device/FIFO/socket nodes; per-block gzip; UID/GID dedup;
     backpatched superblock). Deliberately omits fragment blocks, xattrs, the
@@ -118,9 +120,11 @@ build "deferred" — it is built.)*
   snapshot-control server, then execs and supervises the workload (signal
   forwarding, orphan reaping, power-off on exit).
 - **Image catalog / config:** `config.FirecrackerConfig` (`FC_*` env) + runtime
-  selector (`RuntimeFake`/`RuntimeFirecracker`); rootfs resolved per-version from
-  `FC_IMAGE_DIR` (`minecraft-<version>.ext4`, with an optional `FC_DEFAULT_IMAGE`
-  fallback); shared `vmlinux` kernel.
+  selector (`RuntimeFake`/`RuntimeFirecracker`); rootfs resolved per-server from
+  an OCI ref (`FC_IMAGE_REF`, `{version}`-templated, with an optional
+  `FC_IMAGE_REF_DEFAULT`), converted to a cached squashfs under
+  `FC_IMAGE_CACHE_DIR`; per-arch init binaries (`FC_INIT_BIN_AMD64/ARM64`)
+  injected by the converter; shared `vmlinux` kernel.
 - **Verify:** non-KVM unit tests (config/artifact validation, squashfs round-trip
   via `unsquashfs`, image resolution, idempotency edges); KVM-gated lifecycle +
   MMDS tests (`-tags kvm`, `make test-kvm`).
@@ -208,12 +212,6 @@ it is feature-complete for IPv4 TCP/UDP.)*
 - **Provisioning capacity race:** the scheduler reserves, but if real host
   capacity has shrunk by the time the agent provisions, there is no rollback — the
   server retries next tick. Acceptable for now; revisit with P8 fencing.
-- **Wire the squashfs converter into the runtime** (closes the P4 integration
-  gap above): have `Runtime.Provision` build/resolve the OCI→squashfs image via
-  `internal/image`, attach it **read-only** as `/dev/vda`, boot `cmd/init` with
-  `root=/dev/vda ro` + the persist overlay, and retire the writable-`.ext4`
-  catalog. Today these are two parallel paths; only the legacy ext4 one is the
-  real rootfs source.
 
 ### P7 — Observability / deep health  ⏳ not started
 - **Goal:** know the *Minecraft process* is up, not just the VM.

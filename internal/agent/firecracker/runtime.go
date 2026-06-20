@@ -3,9 +3,9 @@ package firecracker
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,14 +140,26 @@ func (r *Runtime) snapshotCandidates() []*machine {
 	return out
 }
 
-// Provision creates a per-VM working dir + writable rootfs and boots a microVM.
+// Provision converts the spec's image to a read-only squashfs, creates a per-VM
+// working dir, and boots a microVM whose PID 1 is the injected init agent. The
+// init fetches its RunSpec from MMDS; world state rides a separate writable
+// disk, never the rootfs.
 func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, error) {
 	if spec.CPUs <= 0 || spec.MemoryMB <= 0 {
 		return nil, fmt.Errorf("firecracker: invalid spec: cpus=%d memory_mb=%d", spec.CPUs, spec.MemoryMB)
 	}
-	baseImage, err := r.cfg.imageFor(spec.Version)
+
+	// Resolve and (on first use) build the content-addressed read-only squashfs
+	// rootfs for this server's image, and take the RunSpec the converter
+	// distilled from the OCI config. The rootfs is shared across VMs booting the
+	// same image — it is attached read-only, so there is no per-VM copy.
+	ref, err := r.cfg.imageRefFor(spec.Version)
 	if err != nil {
 		return nil, err
+	}
+	rootfs, baseSpec, err := r.cfg.ImageStore.Ensure(ctx, ref, hostPlatform())
+	if err != nil {
+		return nil, fmt.Errorf("firecracker: resolve image %q: %w", ref, err)
 	}
 
 	id := "vm-" + uuid.NewString()
@@ -156,78 +168,70 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 		return nil, fmt.Errorf("firecracker: vm dir: %w", err)
 	}
 
-	// A per-VM writable copy of the base image. It survives stop/start so the
-	// world persists across a restart on this host (cross-host persistence is P5).
-	rootfs := filepath.Join(dir, "rootfs.ext4")
-	if err := copyFile(baseImage, rootfs); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("firecracker: stage rootfs: %w", err)
+	// Start from the converter's RunSpec and let the caller's spec (when set)
+	// override command/env/workdir — that is how a server selects a non-default
+	// entrypoint without rebuilding the image. The NAT dataplane and world
+	// persistence then layer their guest-applied config on top.
+	rs := baseSpec
+	if spec.RunSpec != nil {
+		applyRunSpecOverride(&rs, spec.RunSpec)
 	}
-
-	// Both the NAT dataplane and world persistence augment the runspec the
-	// guest init fetches, and both only apply on the MMDS/runspec path —
-	// legacy ext4 VMs (no runspec) have their own init and stay MMDS-only.
-	// Copy the caller's runspec once so we never mutate a shared struct.
-	runSpec := spec.RunSpec
 	var vmnet vmNet
 	var worldDisk, worldKey string
-	if runSpec != nil && (r.dp != nil || r.cfg.persistEnabled()) {
-		rs := *runSpec
 
-		if r.dp != nil {
-			n, err := r.ipam.allocate()
-			if err != nil {
-				_ = os.RemoveAll(dir)
-				return nil, err
-			}
-			vmnet = n
-			rs.Net = &runspec.NetConfig{
-				Interface:  runspec.MMDSInterface,
-				Address:    vmnet.VMIP.String(),
-				PrefixLen:  vmnet.PrefixLen,
-				Gateway:    vmnet.GatewayIP.String(),
-				GatewayMAC: vmnet.GatewayMAC.String(),
-			}
+	if r.dp != nil {
+		n, err := r.ipam.allocate()
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			return nil, err
 		}
-
-		if r.cfg.persistEnabled() {
-			target, ok := persistTarget(rs.WorkingDir)
-			if !ok {
-				r.releaseNet(vmnet)
-				_ = os.RemoveAll(dir)
-				return nil, fmt.Errorf("firecracker: world persistence requires an absolute, non-root WorkingDir, got %q", rs.WorkingDir)
-			}
-			// Key the disk by server id so it can outlive this VM instance and
-			// a host reschedule (the world store is keyed the same way); fall
-			// back to the VM id when a spec carries no server id.
-			worldKey = spec.ServerID
-			if worldKey == "" {
-				worldKey = id
-			}
-			wd := r.cfg.worldDiskPath(worldKey)
-			if err := r.prepareWorldDisk(ctx, worldKey, wd); err != nil {
-				r.releaseNet(vmnet)
-				_ = os.RemoveAll(dir)
-				return nil, fmt.Errorf("firecracker: world disk: %w", err)
-			}
-			worldDisk = wd
-			rs.Persist = &runspec.PersistConfig{Device: worldDevice, Mountpoint: target}
-
-			// When a store is configured, enable live snapshots: the guest
-			// gets a Quiesce block (flush + freeze) and we attach a vsock
-			// device below so the host can drive it.
-			if r.cfg.liveSnapshotEnabled() {
-				q := &runspec.QuiesceConfig{}
-				if r.cfg.RCONPassword != "" {
-					q.RCONAddress = fmt.Sprintf("127.0.0.1:%d", r.cfg.RCONPort)
-					q.RCONPassword = r.cfg.RCONPassword
-				}
-				rs.Quiesce = q
-			}
+		vmnet = n
+		rs.Net = &runspec.NetConfig{
+			Interface:  runspec.MMDSInterface,
+			Address:    vmnet.VMIP.String(),
+			PrefixLen:  vmnet.PrefixLen,
+			Gateway:    vmnet.GatewayIP.String(),
+			GatewayMAC: vmnet.GatewayMAC.String(),
 		}
-
-		runSpec = &rs
 	}
+
+	if r.cfg.persistEnabled() {
+		target, ok := persistTarget(rs.WorkingDir)
+		if !ok {
+			r.releaseNet(vmnet)
+			_ = os.RemoveAll(dir)
+			return nil, fmt.Errorf("firecracker: world persistence requires an absolute, non-root WorkingDir, got %q", rs.WorkingDir)
+		}
+		// Key the disk by server id so it can outlive this VM instance and
+		// a host reschedule (the world store is keyed the same way); fall
+		// back to the VM id when a spec carries no server id.
+		worldKey = spec.ServerID
+		if worldKey == "" {
+			worldKey = id
+		}
+		wd := r.cfg.worldDiskPath(worldKey)
+		if err := r.prepareWorldDisk(ctx, worldKey, wd); err != nil {
+			r.releaseNet(vmnet)
+			_ = os.RemoveAll(dir)
+			return nil, fmt.Errorf("firecracker: world disk: %w", err)
+		}
+		worldDisk = wd
+		rs.Persist = &runspec.PersistConfig{Device: worldDevice, Mountpoint: target}
+
+		// When a store is configured, enable live snapshots: the guest
+		// gets a Quiesce block (flush + freeze) and we attach a vsock
+		// device below so the host can drive it.
+		if r.cfg.liveSnapshotEnabled() {
+			q := &runspec.QuiesceConfig{}
+			if r.cfg.RCONPassword != "" {
+				q.RCONAddress = fmt.Sprintf("127.0.0.1:%d", r.cfg.RCONPort)
+				q.RCONPassword = r.cfg.RCONPassword
+			}
+			rs.Quiesce = q
+		}
+	}
+
+	runSpec := &rs
 
 	// The host-side vsock UDS lives in the per-VM dir; set it when this VM has
 	// a Quiesce block so configure() attaches the device.
@@ -429,21 +433,50 @@ func (r *Runtime) vmView(m *machine) *agent.VM {
 	}
 }
 
-// copyFile copies src to dst, creating dst (truncating if present).
-func copyFile(src, dst string) error {
-	in, err := os.Open(src) //nolint:gosec // driver-controlled path
-	if err != nil {
-		return err
+// applyRunSpecOverride layers a caller-supplied RunSpec over the one the image
+// converter distilled from the OCI config. Only the fields the caller set take
+// effect; everything else keeps the image's value. Command precedence follows
+// OCI semantics — supplying either Entrypoint or Cmd replaces both, so a caller
+// can fully control argv — while Env is merged by key (the override wins) so a
+// caller can inject a single variable without dropping the image's environment.
+func applyRunSpecOverride(base *runspec.RunSpec, over *runspec.RunSpec) {
+	if len(over.Entrypoint) > 0 || len(over.Cmd) > 0 {
+		base.Entrypoint = over.Entrypoint
+		base.Cmd = over.Cmd
 	}
-	defer func() { _ = in.Close() }()
+	if len(over.Env) > 0 {
+		base.Env = mergeEnv(base.Env, over.Env)
+	}
+	if over.WorkingDir != "" {
+		base.WorkingDir = over.WorkingDir
+	}
+}
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640) //nolint:gosec // driver-controlled path
-	if err != nil {
-		return err
+// mergeEnv returns base with over's entries applied: an over entry "K=V"
+// replaces base's "K=..." in place (preserving order), and any over key not in
+// base is appended. Entries without an '=' are treated as bare keys.
+func mergeEnv(base, over []string) []string {
+	out := append([]string(nil), base...)
+	for _, e := range over {
+		key := e
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			key = e[:i]
+		}
+		replaced := false
+		for j, b := range out {
+			bk := b
+			if i := strings.IndexByte(b, '='); i >= 0 {
+				bk = b[:i]
+			}
+			if bk == key {
+				out[j] = e
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, e)
+		}
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
+	return out
 }

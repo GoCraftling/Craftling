@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+#
+# Host agent (MODE=agent) image with the Firecracker driver. Unlike the server
+# image (chainguard/static, nonroot), the agent boots real microVMs, so it needs
+# /dev/kvm, root, the firecracker binary, mkfs.ext4 (world disks) and modprobe
+# (conntrack for the eBPF NAT). Intended for local testing via docker-compose.
+
+# --- Build stage ---
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+# Cache dependencies first.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Build the statically-linked agent binary plus the in-guest init agent (PID 1)
+# for both guest architectures. The image converter injects the matching init
+# binary into each rootfs it builds, so the agent needs them on disk.
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/agent ./cmd/agent \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/init-amd64 ./cmd/init \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /out/init-arm64 ./cmd/init
+
+# --- Firecracker fetch stage ---
+FROM alpine:3.20 AS firecracker
+ARG FIRECRACKER_VERSION=v1.16.0
+ARG TARGETARCH=amd64
+RUN apk add --no-cache curl tar \
+    && arch="$(case "$TARGETARCH" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo "$TARGETARCH";; esac)" \
+    && curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${arch}.tgz" \
+       | tar -xz -C /tmp \
+    && install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-${arch}/firecracker-${FIRECRACKER_VERSION}-${arch}" /usr/local/bin/firecracker
+
+# --- Runtime stage ---
+FROM debian:bookworm-slim
+
+# e2fsprogs: mkfs.ext4 for world disks. kmod: modprobe nf_conntrack for the eBPF
+# NAT. iproute2: handy for debugging tap/veth inside the container.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates e2fsprogs kmod iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=firecracker /usr/local/bin/firecracker /usr/local/bin/firecracker
+COPY --from=build /out/agent /app/agent
+COPY --from=build /out/init-amd64 /app/init-amd64
+COPY --from=build /out/init-arm64 /app/init-arm64
+
+ENV MODE=agent \
+    PORT=9000 \
+    AGENT_RUNTIME=firecracker \
+    FC_BINARY=/usr/local/bin/firecracker \
+    FC_INIT_BIN_AMD64=/app/init-amd64 \
+    FC_INIT_BIN_ARM64=/app/init-arm64
+
+EXPOSE 9000
+
+ENTRYPOINT ["/app/agent"]

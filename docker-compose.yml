@@ -37,7 +37,7 @@ services:
       ADMIN_EMAIL: admin@craftling.gg
       ADMIN_PASSWORD: adminpassword
     ports:
-      - "8081:8080"
+      - "8082:8080"
     depends_on:
       db:
         condition: service_healthy
@@ -49,7 +49,50 @@ services:
     environment:
       API_UPSTREAM: http://server:8080
     ports:
-      - "8080:80"
+      - "8081:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  # Host agent with the real Firecracker driver — local testing only.
+  # Needs /dev/kvm and elevated privileges to create TAP devices and load the
+  # eBPF NAT, so it runs privileged. You must supply a vmlinux kernel under
+  # ./fc-assets; rootfs images are converted from OCI on demand (see
+  # FC_IMAGE_REF) and cached under FC_IMAGE_CACHE_DIR. e.g.:
+  #   ./fc-assets/vmlinux
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      MODE: agent
+      PORT: "9000"
+      APP_ENV: production
+      CONTROL_PLANE_URL: http://server:8080
+      # Address the control plane calls back (reachable on the compose network).
+      ADVERTISE_ADDR: agent:9000
+      # Player-facing connect host VMs report (override for real connectivity).
+      ADVERTISE_HOST: 127.0.0.1
+      AGENT_RUNTIME: firecracker
+      FC_BINARY: /usr/local/bin/firecracker
+      FC_KERNEL: /var/lib/craftling/vmlinux
+      # OCI image converted to a read-only squashfs rootfs per server. A
+      # "{version}" placeholder is substituted with the server's version; a ref
+      # without it (as here) is used verbatim. The init binary is injected by
+      # the converter (baked into the agent image, see Dockerfile.agent).
+      FC_IMAGE_REF: docker.io/itzg/minecraft-server:java21
+      # Where converted, content-addressed squashfs rootfs files are cached.
+      FC_IMAGE_CACHE_DIR: /var/lib/craftling/images
+      FC_WORK_DIR: /var/lib/craftling/work
+    devices:
+      # Mount KVM so Firecracker can boot microVMs.
+      - "/dev/kvm:/dev/kvm"
+    privileged: true
+    volumes:
+      - ./fc-assets:/var/lib/craftling
+    ports:
+      # Exposed for debugging the agent API directly.
+      - "9000:9000"
     depends_on:
       - server
     restart: unless-stopped

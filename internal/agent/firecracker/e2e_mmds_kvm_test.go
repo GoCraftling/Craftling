@@ -55,20 +55,19 @@ const e2eImageRef = "docker.io/library/busybox:1.37"
 func TestKVMMMDSEnvRoundTrip(t *testing.T) {
 	binPath, kernel := requireFirecracker(t)
 
-	// Build the rootfs and init once, into an ImageDir the runtime will
-	// resolve as its DefaultImage.
-	imageDir := t.TempDir()
-	rootfsName := buildE2ERootfs(t, imageDir)
+	// An image.Store + pinned busybox ref the runtime resolves and converts
+	// through the normal Provision path.
+	store, ref := e2eImage(t)
 
 	rt, err := New(Config{
-		BinaryPath:   binPath,
-		KernelPath:   kernel,
-		ImageDir:     imageDir,
-		DefaultImage: rootfsName,
-		WorkDir:      t.TempDir(),
+		BinaryPath: binPath,
+		KernelPath: kernel,
+		ImageStore: store,
+		ImageRef:   ref,
+		WorkDir:    t.TempDir(),
 		// Read-only squashfs root, init at the path internal/image
 		// injects. effectiveBootArgs appends the MMDS ip= directive
-		// because the spec below is non-nil.
+		// because the runtime always carries a run spec now.
 		BootArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=" + runspec.InitPath,
 		AdvertiseHost: "127.0.0.1",
 	})
@@ -147,16 +146,17 @@ func requireFirecracker(t *testing.T) (binPath, kernel string) {
 	return binPath, kernel
 }
 
-// buildE2ERootfs cross-compiles the init agent for the host arch, pulls
-// e2eImageRef pinned to the host-arch manifest, and converts it into a
-// squashfs rootfs under imageDir. Returns the rootfs filename for the
-// runtime's DefaultImage.
-func buildE2ERootfs(t *testing.T, imageDir string) string {
+// e2eImage cross-compiles the init agent for the host arch and returns an
+// image.Store (with the init binary wired in) plus the busybox reference
+// pinned to the host-arch manifest digest. The runtime resolves and converts
+// it on demand via Runtime.Provision → Store.Ensure, exercising the real
+// rootfs-source path rather than a pre-staged image.
+func e2eImage(t *testing.T) (*image.Store, string) {
 	t.Helper()
 	arch := runtime.GOARCH
 
 	initBin := buildInitBinary(t, arch)
-	store := &image.Store{CacheDir: imageDir}
+	store := &image.Store{CacheDir: t.TempDir()}
 	switch arch {
 	case "amd64":
 		store.Init.LinuxAmd64 = initBin
@@ -171,21 +171,7 @@ func buildE2ERootfs(t *testing.T, imageDir string) string {
 	if err != nil {
 		t.Fatalf("resolve %s digest: %v", e2eImageRef, err)
 	}
-	pinned := baseRef(e2eImageRef) + "@" + digest
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	if _, err := store.PullImage(ctx, pinned, digest); err != nil {
-		t.Fatalf("build rootfs from %s: %v", pinned, err)
-	}
-	path, err := store.PathFor(digest)
-	if err != nil {
-		t.Fatalf("PathFor: %v", err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected rootfs at %q: %v", path, err)
-	}
-	return filepath.Base(path)
+	return store, baseRef(e2eImageRef) + "@" + digest
 }
 
 // buildInitBinary statically cross-compiles cmd/init for arch.

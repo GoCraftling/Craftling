@@ -38,14 +38,13 @@ func TestKVMWorldPersistence(t *testing.T) {
 		t.Skip("mkfs.ext4 not on PATH; world persistence needs e2fsprogs")
 	}
 
-	imageDir := t.TempDir()
-	rootfsName := buildE2ERootfs(t, imageDir)
+	store, ref := e2eImage(t)
 
 	rt, err := New(Config{
 		BinaryPath:       binPath,
 		KernelPath:       kernel,
-		ImageDir:         imageDir,
-		DefaultImage:     rootfsName,
+		ImageStore:       store,
+		ImageRef:         ref,
 		WorkDir:          t.TempDir(),
 		BootArgs:         "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=" + runspec.InitPath,
 		AdvertiseHost:    "127.0.0.1",
@@ -120,8 +119,7 @@ func TestKVMWorldStoreReschedule(t *testing.T) {
 		t.Skip("mkfs.ext4 not on PATH; world persistence needs e2fsprogs")
 	}
 
-	imageDir := t.TempDir()
-	rootfsName := buildE2ERootfs(t, imageDir)
+	imgStore, ref := e2eImage(t)
 
 	store, err := storage.NewDirStore(t.TempDir())
 	if err != nil {
@@ -131,8 +129,8 @@ func TestKVMWorldStoreReschedule(t *testing.T) {
 		rt, err := New(Config{
 			BinaryPath:       binPath,
 			KernelPath:       kernel,
-			ImageDir:         imageDir,
-			DefaultImage:     rootfsName,
+			ImageStore:       imgStore,
+			ImageRef:         ref,
 			WorkDir:          t.TempDir(), // distinct per runtime → no shared local disk
 			BootArgs:         "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=" + runspec.InitPath,
 			AdvertiseHost:    "127.0.0.1",
@@ -206,8 +204,7 @@ func TestKVMLiveSnapshot(t *testing.T) {
 		t.Skip("mkfs.ext4 not on PATH; world persistence needs e2fsprogs")
 	}
 
-	imageDir := t.TempDir()
-	rootfsName := buildE2ERootfs(t, imageDir)
+	imgStore, ref := e2eImage(t)
 	store, err := storage.NewDirStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("new store: %v", err)
@@ -216,8 +213,8 @@ func TestKVMLiveSnapshot(t *testing.T) {
 		rt, err := New(Config{
 			BinaryPath:       binPath,
 			KernelPath:       kernel,
-			ImageDir:         imageDir,
-			DefaultImage:     rootfsName,
+			ImageStore:       imgStore,
+			ImageRef:         ref,
 			WorkDir:          t.TempDir(),
 			BootArgs:         "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=" + runspec.InitPath,
 			AdvertiseHost:    "127.0.0.1",

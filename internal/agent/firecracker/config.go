@@ -20,27 +20,40 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 
+	"github.com/aarani/craftling-go/internal/image"
+	"github.com/aarani/craftling-go/internal/runspec"
 	"github.com/aarani/craftling-go/internal/storage"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"go.uber.org/zap"
 )
 
 // Config configures the Firecracker Runtime. Paths point at host artifacts
-// (kernel, per-version rootfs images) provided out of band on the agent host.
+// (kernel, the squashfs image cache) provided out of band on the agent host.
 type Config struct {
 	// BinaryPath is the firecracker executable. Defaults to "firecracker" on PATH.
 	BinaryPath string
 	// KernelPath is the uncompressed kernel (vmlinux) all VMs boot.
 	KernelPath string
-	// ImageDir holds per-version base rootfs images named "minecraft-<version>.ext4".
-	ImageDir string
-	// DefaultImage is the rootfs filename (within ImageDir) used when a spec's
-	// version has no dedicated image. Empty means an unknown version is rejected.
-	DefaultImage string
-	// WorkDir is where per-VM working directories (sockets, writable rootfs,
-	// logs) live. Defaults to a "craftling-fc" dir under the OS temp dir.
+	// ImageStore converts OCI images into content-addressed read-only squashfs
+	// rootfs files and resolves their RunSpec. Provision pulls the spec's image
+	// through it, attaches the resulting squashfs as a read-only /dev/vda, and
+	// publishes the RunSpec into MMDS for the in-VM init. Required.
+	ImageStore *image.Store
+	// ImageRef is the OCI image reference the driver converts for a server. A
+	// "{version}" placeholder is substituted with the spec's version, so one
+	// template (e.g. "myrepo/minecraft:{version}") covers every version. A ref
+	// with no placeholder is used verbatim regardless of version.
+	ImageRef string
+	// DefaultImageRef is the OCI reference used when a spec carries no version
+	// and ImageRef needs one (placeholder present). Empty rejects a
+	// version-less spec against a templated ImageRef.
+	DefaultImageRef string
+	// WorkDir is where per-VM working directories (sockets, logs, vsock UDS)
+	// live. Defaults to a "craftling-fc" dir under the OS temp dir.
 	WorkDir string
 	// AdvertiseHost is the player-facing connect address VMs report. With the
 	// eBPF NAT dataplane enabled (UplinkDevice set) this is the host's public
@@ -139,9 +152,14 @@ const (
 	DefaultRCONPort = 25575
 )
 
-// DefaultBootArgs is a minimal serial-console boot line that mounts the rootfs
-// read-write off the first virtio block device.
-const DefaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+// DefaultBootArgs is a minimal serial-console boot line that mounts the
+// read-only squashfs rootfs off the first virtio block device and hands PID 1
+// to the injected init agent. Writable state rides the world disk (/dev/vdb)
+// and tmpfs, never the rootfs.
+const DefaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=" + runspec.InitPath
+
+// versionPlaceholder is the token in ImageRef replaced with a spec's version.
+const versionPlaceholder = "{version}"
 
 // defaultMinecraftPort is the in-VM Minecraft server port. Per-server host port
 // allocation arrives in P6; until then every VM uses the standard port.
@@ -167,13 +185,11 @@ func (c *Config) validate() error {
 	if _, err := os.Stat(c.KernelPath); err != nil {
 		return fmt.Errorf("firecracker: kernel image: %w", err)
 	}
-	if c.ImageDir == "" {
-		return errors.New("firecracker: ImageDir is required")
+	if c.ImageStore == nil {
+		return errors.New("firecracker: ImageStore is required")
 	}
-	if fi, err := os.Stat(c.ImageDir); err != nil {
-		return fmt.Errorf("firecracker: image dir: %w", err)
-	} else if !fi.IsDir() {
-		return fmt.Errorf("firecracker: image dir %q is not a directory", c.ImageDir)
+	if c.ImageRef == "" && c.DefaultImageRef == "" {
+		return errors.New("firecracker: ImageRef or DefaultImageRef is required")
 	}
 	if c.natEnabled() {
 		if err := c.validateDataplane(); err != nil {
@@ -319,22 +335,33 @@ type dataplaneConfig struct {
 	portMax    uint16
 }
 
-// imageFor resolves the base rootfs image path for a Minecraft version,
-// falling back to DefaultImage. It returns an error if neither exists, so an
-// unsupported version fails the provision rather than booting a wrong world.
-func (c *Config) imageFor(version string) (string, error) {
-	if version != "" {
-		p := filepath.Join(c.ImageDir, "minecraft-"+version+".ext4")
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+// imageRefFor resolves the OCI image reference the driver converts for a
+// server. A templated ImageRef (one containing "{version}") is filled in from
+// the spec's version, falling back to DefaultImageRef when the spec carries no
+// version. A non-templated ImageRef is used verbatim regardless of version.
+// Returns an error when nothing can be resolved, so a misconfigured spec fails
+// the provision rather than booting the wrong image.
+func (c *Config) imageRefFor(version string) (string, error) {
+	if c.ImageRef != "" {
+		if strings.Contains(c.ImageRef, versionPlaceholder) {
+			if version == "" {
+				if c.DefaultImageRef != "" {
+					return c.DefaultImageRef, nil
+				}
+				return "", fmt.Errorf("firecracker: image ref %q needs a version and no DefaultImageRef is set", c.ImageRef)
+			}
+			return strings.ReplaceAll(c.ImageRef, versionPlaceholder, version), nil
 		}
+		return c.ImageRef, nil
 	}
-	if c.DefaultImage != "" {
-		p := filepath.Join(c.ImageDir, c.DefaultImage)
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-		return "", fmt.Errorf("firecracker: default image %q not found in %s", c.DefaultImage, c.ImageDir)
+	if c.DefaultImageRef != "" {
+		return c.DefaultImageRef, nil
 	}
-	return "", fmt.Errorf("firecracker: no rootfs image for version %q in %s", version, c.ImageDir)
+	return "", fmt.Errorf("firecracker: no image ref configured for version %q", version)
+}
+
+// hostPlatform is the OCI platform the driver pulls images for: linux on the
+// host's architecture, since a Firecracker guest runs the host's ISA.
+func hostPlatform() *v1.Platform {
+	return &v1.Platform{OS: "linux", Architecture: goruntime.GOARCH}
 }

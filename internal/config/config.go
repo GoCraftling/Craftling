@@ -78,10 +78,20 @@ type FirecrackerConfig struct {
 	BinaryPath string
 	// KernelPath is the uncompressed kernel (vmlinux) all VMs boot.
 	KernelPath string
-	// ImageDir holds per-version base rootfs images (minecraft-<version>.ext4).
-	ImageDir string
-	// DefaultImage is the rootfs filename used when a version has no image.
-	DefaultImage string
+	// ImageRef is the OCI image reference the driver converts to a squashfs
+	// rootfs. A "{version}" placeholder is substituted with the server's
+	// version (e.g. "myrepo/minecraft:{version}").
+	ImageRef string
+	// DefaultImageRef is the OCI reference used when a server carries no
+	// version and ImageRef is templated.
+	DefaultImageRef string
+	// CacheDir is where converted content-addressed squashfs rootfs files are
+	// cached (empty: "images" under WorkDir).
+	CacheDir string
+	// InitBinAmd64 / InitBinArm64 are the host paths of the prebuilt cmd/init
+	// binaries injected as PID 1 into the rootfs, one per guest architecture.
+	InitBinAmd64 string
+	InitBinArm64 string
 	// WorkDir is where per-VM working dirs live (empty: OS temp dir).
 	WorkDir string
 
@@ -150,8 +160,11 @@ func Load() *Config {
 			Firecracker: FirecrackerConfig{
 				BinaryPath:       getEnv("FC_BINARY", ""),
 				KernelPath:       getEnv("FC_KERNEL", ""),
-				ImageDir:         getEnv("FC_IMAGE_DIR", ""),
-				DefaultImage:     getEnv("FC_DEFAULT_IMAGE", ""),
+				ImageRef:         getEnv("FC_IMAGE_REF", ""),
+				DefaultImageRef:  getEnv("FC_IMAGE_REF_DEFAULT", ""),
+				CacheDir:         getEnv("FC_IMAGE_CACHE_DIR", ""),
+				InitBinAmd64:     getEnv("FC_INIT_BIN_AMD64", ""),
+				InitBinArm64:     getEnv("FC_INIT_BIN_ARM64", ""),
 				WorkDir:          getEnv("FC_WORK_DIR", ""),
 				WorldPersistence: getBoolEnv("FC_WORLD_PERSIST", false),
 				DataDir:          getEnv("FC_DATA_DIR", ""),

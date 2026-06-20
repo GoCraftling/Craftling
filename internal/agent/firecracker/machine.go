@@ -19,14 +19,14 @@ import (
 
 // machine is a single Firecracker microVM: the host process plus an API client
 // bound to its control socket. A machine outlives a stop (the process is killed
-// but its writable rootfs and metadata are kept so Start can re-boot it); it is
+// but its metadata and world disk are kept so Start can re-boot it); it is
 // gone only after destroy.
 type machine struct {
 	id       string
 	serverID string
 	dir      string // per-VM working directory
 	socket   string // API Unix socket path
-	rootfs   string // writable per-VM rootfs (survives stop/start)
+	rootfs   string // read-only squashfs rootfs image (shared, content-addressed)
 	kernel   string
 	binary   string // firecracker executable
 	bootArgs string
@@ -125,6 +125,9 @@ func (m *machine) configure(ctx context.Context) error {
 		return fmt.Errorf("boot source: %w", err)
 	}
 
+	// The rootfs is the immutable, content-addressed squashfs image, shared
+	// across every VM booting the same image — attach it read-only. All
+	// writable state rides the world disk (/dev/vdb) and tmpfs.
 	driveID := "rootfs"
 	isRoot := true
 	if _, err := m.api.PutGuestDriveByID(fcclient.NewPutGuestDriveByIDParamsWithContext(ctx).
@@ -132,7 +135,7 @@ func (m *machine) configure(ctx context.Context) error {
 		WithBody(&fcmodels.Drive{
 			DriveID:      &driveID,
 			IsRootDevice: &isRoot,
-			IsReadOnly:   false,
+			IsReadOnly:   true,
 			PathOnHost:   m.rootfs,
 		})); err != nil {
 		return fmt.Errorf("root drive: %w", err)

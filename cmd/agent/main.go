@@ -12,13 +12,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/agent/firecracker"
 	"github.com/aarani/craftling-go/internal/config"
+	"github.com/aarani/craftling-go/internal/image"
 	applogger "github.com/aarani/craftling-go/internal/logger"
 	"github.com/aarani/craftling-go/internal/worldstore"
 	"go.uber.org/zap"
@@ -103,18 +106,27 @@ func newRuntime(cfg *config.Config, log *zap.Logger) (agent.Runtime, error) {
 	case config.RuntimeFirecracker:
 		log.Info("using firecracker runtime",
 			zap.String("kernel", cfg.Agent.Firecracker.KernelPath),
-			zap.String("image_dir", cfg.Agent.Firecracker.ImageDir))
+			zap.String("image_ref", cfg.Agent.Firecracker.ImageRef),
+			zap.String("image_cache_dir", imageCacheDir(cfg.Agent.Firecracker)))
 		storeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		worldStore, err := worldstore.FromConfig(storeCtx, cfg.Agent.Firecracker, log)
 		cancel()
 		if err != nil {
 			return nil, err
 		}
+		imageStore := &image.Store{
+			CacheDir: imageCacheDir(cfg.Agent.Firecracker),
+			Init: image.InitBinaries{
+				LinuxAmd64: cfg.Agent.Firecracker.InitBinAmd64,
+				LinuxArm64: cfg.Agent.Firecracker.InitBinArm64,
+			},
+		}
 		return firecracker.New(firecracker.Config{
 			BinaryPath:       cfg.Agent.Firecracker.BinaryPath,
 			KernelPath:       cfg.Agent.Firecracker.KernelPath,
-			ImageDir:         cfg.Agent.Firecracker.ImageDir,
-			DefaultImage:     cfg.Agent.Firecracker.DefaultImage,
+			ImageStore:       imageStore,
+			ImageRef:         cfg.Agent.Firecracker.ImageRef,
+			DefaultImageRef:  cfg.Agent.Firecracker.DefaultImageRef,
 			WorkDir:          cfg.Agent.Firecracker.WorkDir,
 			AdvertiseHost:    cfg.Agent.AdvertiseHost,
 			WorldPersistence: cfg.Agent.Firecracker.WorldPersistence,
@@ -133,6 +145,21 @@ func newRuntime(cfg *config.Config, log *zap.Logger) (agent.Runtime, error) {
 	default:
 		return nil, fmt.Errorf("unknown agent runtime %q", cfg.Agent.Runtime)
 	}
+}
+
+// imageCacheDir resolves where converted squashfs rootfs files are cached: the
+// configured CacheDir, else an "images" dir alongside the per-VM WorkDir (the
+// same default the driver uses for WorkDir), so a single FC_WORK_DIR is enough
+// to keep all driver state under one tree.
+func imageCacheDir(fc config.FirecrackerConfig) string {
+	if fc.CacheDir != "" {
+		return fc.CacheDir
+	}
+	workDir := fc.WorkDir
+	if workDir == "" {
+		workDir = filepath.Join(os.TempDir(), "craftling-fc")
+	}
+	return filepath.Join(workDir, "images")
 }
 
 // runRegistration registers the host then heartbeats on an interval until ctx is

@@ -5,10 +5,21 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/aarani/craftling-go/internal/agent"
+	"github.com/aarani/craftling-go/internal/image"
+	"github.com/aarani/craftling-go/internal/runspec"
 )
+
+// testImageStore returns an image.Store over a throwaway cache dir. The
+// non-KVM unit tests never actually convert an image (they stop before any
+// Ensure call), so the store only needs to satisfy Config.validate.
+func testImageStore(t *testing.T) *image.Store {
+	t.Helper()
+	return &image.Store{CacheDir: t.TempDir()}
+}
 
 // newTestRuntime builds a Runtime over throwaway host artifacts so the
 // non-KVM unit tests can exercise validation, image resolution, and the
@@ -20,13 +31,10 @@ func newTestRuntime(t *testing.T) *Runtime {
 	if err := os.WriteFile(kernel, []byte("kernel"), 0o600); err != nil {
 		t.Fatalf("write kernel: %v", err)
 	}
-	imageDir := filepath.Join(dir, "images")
-	if err := os.MkdirAll(imageDir, 0o750); err != nil {
-		t.Fatalf("mkdir images: %v", err)
-	}
 	rt, err := New(Config{
 		KernelPath:    kernel,
-		ImageDir:      imageDir,
+		ImageStore:    testImageStore(t),
+		ImageRef:      "example.invalid/mc:{version}",
 		WorkDir:       filepath.Join(dir, "work"),
 		AdvertiseHost: "10.0.0.5",
 	})
@@ -42,48 +50,82 @@ func TestNewValidatesArtifacts(t *testing.T) {
 	if err := os.WriteFile(kernel, []byte("k"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	store := testImageStore(t)
 
-	if _, err := New(Config{ImageDir: dir}); err == nil {
+	if _, err := New(Config{ImageStore: store, ImageRef: "x:{version}"}); err == nil {
 		t.Error("missing kernel: expected error")
 	}
-	if _, err := New(Config{KernelPath: filepath.Join(dir, "nope")}); err == nil {
+	if _, err := New(Config{KernelPath: filepath.Join(dir, "nope"), ImageStore: store, ImageRef: "x"}); err == nil {
 		t.Error("nonexistent kernel: expected error")
 	}
-	if _, err := New(Config{KernelPath: kernel, ImageDir: filepath.Join(dir, "nope")}); err == nil {
-		t.Error("missing image dir: expected error")
+	if _, err := New(Config{KernelPath: kernel, ImageRef: "x"}); err == nil {
+		t.Error("missing image store: expected error")
 	}
-	if _, err := New(Config{KernelPath: kernel, ImageDir: kernel}); err == nil {
-		t.Error("image dir is a file: expected error")
-	}
-}
-
-func TestImageFor(t *testing.T) {
-	dir := t.TempDir()
-	mustTouch(t, filepath.Join(dir, "minecraft-1.20.4.ext4"))
-	mustTouch(t, filepath.Join(dir, "base.ext4"))
-
-	cfg := Config{ImageDir: dir, DefaultImage: "base.ext4"}
-
-	got, err := cfg.imageFor("1.20.4")
-	if err != nil || filepath.Base(got) != "minecraft-1.20.4.ext4" {
-		t.Errorf("imageFor(known) = %q, %v; want the versioned image", got, err)
-	}
-
-	got, err = cfg.imageFor("9.9.9")
-	if err != nil || filepath.Base(got) != "base.ext4" {
-		t.Errorf("imageFor(unknown) = %q, %v; want the default image", got, err)
-	}
-
-	noDefault := Config{ImageDir: dir}
-	if _, err := noDefault.imageFor("9.9.9"); err == nil {
-		t.Error("imageFor(unknown, no default): expected error")
+	if _, err := New(Config{KernelPath: kernel, ImageStore: store}); err == nil {
+		t.Error("missing image ref and default: expected error")
 	}
 }
 
-func TestImageForMissingDefault(t *testing.T) {
-	cfg := Config{ImageDir: t.TempDir(), DefaultImage: "ghost.ext4"}
-	if _, err := cfg.imageFor("1.20.4"); err == nil {
-		t.Error("default image absent on disk: expected error")
+func TestImageRefFor(t *testing.T) {
+	templated := Config{ImageRef: "repo/mc:{version}", DefaultImageRef: "repo/mc:latest"}
+	if got, err := templated.imageRefFor("1.20.4"); err != nil || got != "repo/mc:1.20.4" {
+		t.Errorf("imageRefFor(version) = %q, %v; want repo/mc:1.20.4", got, err)
+	}
+	if got, err := templated.imageRefFor(""); err != nil || got != "repo/mc:latest" {
+		t.Errorf("imageRefFor(\"\") = %q, %v; want the default ref", got, err)
+	}
+
+	fixed := Config{ImageRef: "repo/mc@sha256:abc"}
+	if got, err := fixed.imageRefFor("1.20.4"); err != nil || got != "repo/mc@sha256:abc" {
+		t.Errorf("imageRefFor(fixed) = %q, %v; want the ref verbatim", got, err)
+	}
+
+	noDefault := Config{ImageRef: "repo/mc:{version}"}
+	if _, err := noDefault.imageRefFor(""); err == nil {
+		t.Error("templated ref with no version and no default: expected error")
+	}
+
+	defaultOnly := Config{DefaultImageRef: "repo/d:latest"}
+	if got, err := defaultOnly.imageRefFor(""); err != nil || got != "repo/d:latest" {
+		t.Errorf("imageRefFor(default only) = %q, %v; want repo/d:latest", got, err)
+	}
+}
+
+func TestApplyRunSpecOverride(t *testing.T) {
+	base := runspec.RunSpec{
+		Entrypoint: []string{"/entry"},
+		Cmd:        []string{"default"},
+		Env:        []string{"PATH=/bin", "VERSION=LATEST"},
+		WorkingDir: "/data",
+	}
+
+	// A no-op override leaves the base untouched.
+	noop := base
+	applyRunSpecOverride(&noop, &runspec.RunSpec{})
+	if !reflect.DeepEqual(noop, base) {
+		t.Errorf("empty override mutated base: got %+v", noop)
+	}
+
+	// Cmd replaces both Entrypoint and Cmd; Env merges by key; WorkingDir wins.
+	got := base
+	applyRunSpecOverride(&got, &runspec.RunSpec{
+		Cmd:        []string{"/bin/sh", "-c", "echo hi"},
+		Env:        []string{"VERSION=1.20.4", "EXTRA=1"},
+		WorkingDir: "/root",
+	})
+	if len(got.Entrypoint) != 0 {
+		t.Errorf("Entrypoint = %v, want cleared when Cmd overridden", got.Entrypoint)
+	}
+	wantCmd := []string{"/bin/sh", "-c", "echo hi"}
+	if !reflect.DeepEqual(got.Cmd, wantCmd) {
+		t.Errorf("Cmd = %v, want %v", got.Cmd, wantCmd)
+	}
+	wantEnv := []string{"PATH=/bin", "VERSION=1.20.4", "EXTRA=1"}
+	if !reflect.DeepEqual(got.Env, wantEnv) {
+		t.Errorf("Env = %v, want %v (merged by key)", got.Env, wantEnv)
+	}
+	if got.WorkingDir != "/root" {
+		t.Errorf("WorkingDir = %q, want /root", got.WorkingDir)
 	}
 }
 
@@ -124,40 +166,14 @@ func TestProvisionRejectsInvalidSpec(t *testing.T) {
 	}
 }
 
-func TestProvisionUnknownVersion(t *testing.T) {
+// TestProvisionUnresolvableImage checks Provision fails fast — before any
+// network pull — when the image reference can't be resolved. newTestRuntime's
+// ImageRef is templated with no DefaultImageRef, so a version-less spec has no
+// ref to convert.
+func TestProvisionUnresolvableImage(t *testing.T) {
 	rt := newTestRuntime(t)
 	if _, err := rt.Provision(context.Background(),
-		agent.VMSpec{Version: "1.20.4", CPUs: 2, MemoryMB: 1024}); err == nil {
-		t.Error("Provision with no matching image: expected error")
-	}
-}
-
-func TestCopyFile(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src")
-	dst := filepath.Join(dir, "sub", "dst")
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	want := []byte("rootfs-bytes")
-	if err := os.WriteFile(src, want, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := copyFile(src, dst); err != nil {
-		t.Fatalf("copyFile: %v", err)
-	}
-	got, err := os.ReadFile(dst) //nolint:gosec // test path
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(want) {
-		t.Errorf("copied = %q, want %q", got, want)
-	}
-}
-
-func mustTouch(t *testing.T, path string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
-		t.Fatalf("touch %s: %v", path, err)
+		agent.VMSpec{Version: "", CPUs: 2, MemoryMB: 1024}); err == nil {
+		t.Error("Provision with unresolvable image ref: expected error")
 	}
 }

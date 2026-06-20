@@ -1,53 +1,60 @@
-//go:build kvm
+//go:build kvm && linux
 
 // This integration test boots a real Firecracker microVM and therefore needs
 // /dev/kvm plus host artifacts. It is gated behind the `kvm` build tag and kept
 // out of the default CI lane (run on a self-hosted KVM runner — see P10):
 //
-//	FC_KERNEL=/path/vmlinux FC_IMAGE_DIR=/path/images FC_DEFAULT_IMAGE=base.ext4 \
-//	  go test -tags kvm ./internal/agent/firecracker -run TestKVM -v
+//	FC_KERNEL=/path/vmlinux [FC_BINARY=/path/firecracker] \
+//	  sudo -E go test -tags kvm ./internal/agent/firecracker -run TestKVMLifecycle -v
+//
+// It converts a tiny busybox image to a squashfs rootfs on the fly (the same
+// real rootfs-source path production uses) and boots it with a sleep workload,
+// so the VM stays up through the lifecycle assertions.
 package firecracker
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/aarani/craftling-go/internal/agent"
+	"github.com/aarani/craftling-go/internal/runspec"
 )
 
 // TestKVMLifecycle drives a real microVM through the full Runtime contract over
 // the agent seam: provision (boots), stop (process gone, VM kept), start
 // (re-boots from the same rootfs), and deprovision (gone).
 func TestKVMLifecycle(t *testing.T) {
-	kernel := os.Getenv("FC_KERNEL")
-	imageDir := os.Getenv("FC_IMAGE_DIR")
-	if kernel == "" || imageDir == "" {
-		t.Skip("set FC_KERNEL and FC_IMAGE_DIR to run the KVM integration test")
-	}
+	binPath, kernel := requireFirecracker(t)
+	store, ref := e2eImage(t)
 
 	rt, err := New(Config{
-		BinaryPath:    os.Getenv("FC_BINARY"),
+		BinaryPath:    binPath,
 		KernelPath:    kernel,
-		ImageDir:      imageDir,
-		DefaultImage:  os.Getenv("FC_DEFAULT_IMAGE"),
+		ImageStore:    store,
+		ImageRef:      ref,
 		WorkDir:       t.TempDir(),
+		BootArgs:      "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=" + runspec.InitPath,
 		AdvertiseHost: "127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	spec := agent.VMSpec{
 		ServerID: "kvm-it",
 		Game:     "minecraft",
-		Version:  os.Getenv("FC_TEST_VERSION"),
 		CPUs:     1,
 		MemoryMB: 256,
+		// Keep PID 1 alive so the VM stays running for the state assertions;
+		// without this the busybox default would exit and init would power off.
+		RunSpec: &runspec.RunSpec{
+			Cmd:        []string{"/bin/sh", "-c", "exec sleep 600"},
+			WorkingDir: "/",
+		},
 	}
 	vm, err := rt.Provision(ctx, spec)
 	if err != nil {

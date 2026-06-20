@@ -118,15 +118,12 @@ func TestPersistenceConfigDefaults(t *testing.T) {
 	if err := os.WriteFile(kernel, []byte("k"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	imageDir := filepath.Join(dir, "images")
-	if err := os.MkdirAll(imageDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
 	work := filepath.Join(dir, "work")
 
 	rt, err := New(Config{
 		KernelPath:       kernel,
-		ImageDir:         imageDir,
+		ImageStore:       testImageStore(t),
+		ImageRef:         "example.invalid/mc:{version}",
 		WorkDir:          work,
 		WorldPersistence: true,
 		MkfsExt4Path:     kernel, // any existing file satisfies resolveExecutable
@@ -157,14 +154,10 @@ func TestPersistenceConfigRejectsMissingMkfs(t *testing.T) {
 	if err := os.WriteFile(kernel, []byte("k"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	imageDir := filepath.Join(dir, "images")
-	if err := os.MkdirAll(imageDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-
 	_, err := New(Config{
 		KernelPath:       kernel,
-		ImageDir:         imageDir,
+		ImageStore:       testImageStore(t),
+		ImageRef:         "example.invalid/mc:{version}",
 		WorkDir:          filepath.Join(dir, "work"),
 		WorldPersistence: true,
 		MkfsExt4Path:     "/nonexistent/mkfs.ext4",

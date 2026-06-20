@@ -60,9 +60,11 @@ a fresh database and one already at an older revision.
 | `AGENT_RUNTIME`   | `fake`             | VM backend: `fake` (in-memory) or `firecracker` (real microVMs) |
 | `FC_BINARY`       | `firecracker`      | Firecracker executable (PATH lookup by default)        |
 | `FC_KERNEL`       | _(required)_       | Uncompressed `vmlinux` all VMs boot                    |
-| `FC_IMAGE_DIR`    | _(required)_       | Directory of per-version `minecraft-<version>.ext4` rootfs images |
-| `FC_DEFAULT_IMAGE`| _(unset)_          | Fallback rootfs filename when a version has no image   |
-| `FC_WORK_DIR`     | OS temp dir        | Per-VM working dirs (sockets, writable rootfs, logs)   |
+| `FC_IMAGE_REF`    | _(required)_       | OCI image converted to a read-only squashfs rootfs; `{version}` is substituted with the server's version (a ref without it is used as-is) |
+| `FC_IMAGE_REF_DEFAULT`| _(unset)_      | Fallback OCI ref when a server has no version and `FC_IMAGE_REF` is templated |
+| `FC_IMAGE_CACHE_DIR`| `images/` under `FC_WORK_DIR` | Where converted, content-addressed squashfs rootfs files are cached |
+| `FC_INIT_BIN_AMD64` / `FC_INIT_BIN_ARM64` | _(required)_ | Prebuilt `cmd/init` binaries injected as guest PID 1, one per guest arch |
+| `FC_WORK_DIR`     | OS temp dir        | Per-VM working dirs (sockets, logs, vsock UDS)         |
 
 World persistence (P5) is off until you opt in:
 
@@ -233,12 +235,13 @@ read-only **squashfs** rootfs (`internal/squashfs`, a from-scratch writer),
 injecting the Go init binary (`cmd/init`) as PID 1. The init agent mounts the
 kernel filesystems, fetches a **run spec** (`internal/runspec`) from Firecracker's
 MMDS over the link-local address, applies per-VM networking + the persist overlay,
-then execs and supervises the workload — powering the VM off when it exits. This
-pipeline is built and tested, but **not yet wired in as the runtime's rootfs
-source**: production `Provision` still boots the per-version `.ext4` catalog above
-(`root=/dev/vda rw`), with the run-spec/persist/NAT machinery layered on top. The
-control plane resolves launchable templates from a marketplace registry
-(`internal/registry`, the `/templates` API).
+then execs and supervises the workload — powering the VM off when it exits.
+Production `Provision` resolves the server's OCI ref (`FC_IMAGE_REF`), converts
+it through this pipeline (cached by digest), attaches the squashfs **read-only**
+as `/dev/vda`, and boots `cmd/init` with `root=/dev/vda ro init=/.craftling/init`
+— the run-spec/persist/NAT machinery layers on top. The control plane resolves
+launchable templates from a marketplace registry (`internal/registry`, the
+`/templates` API).
 
 **Networking (P6).** An eBPF NAT dataplane gives each VM real connectivity with
 no Linux bridge and no iptables/nftables rules: TCX-attached programs SNAT egress
@@ -308,5 +311,7 @@ The Firecracker lifecycle test is gated behind the `kvm` build tag and kept out
 of the default lane; run it on a KVM host with the `FC_*` artifacts in place:
 
 ```bash
-FC_KERNEL=... FC_IMAGE_DIR=... FC_DEFAULT_IMAGE=base.ext4 make test-kvm
+# The KVM tests convert a tiny busybox image themselves, so only the kernel
+# (and optionally FC_BINARY) is required:
+sudo -E FC_KERNEL=/path/vmlinux make test-kvm
 ```

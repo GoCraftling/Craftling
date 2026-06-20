@@ -164,12 +164,7 @@ func (s *Store) PullImage(_ context.Context, imagePath, expectedDigest string) (
 	if err != nil {
 		return runspec.RunSpec{}, err
 	}
-	if err := os.MkdirAll(s.CacheDir, 0o755); err != nil {
-		return runspec.RunSpec{}, fmt.Errorf("create cache dir %q: %w", s.CacheDir, err)
-	}
 	finalPath := filepath.Join(s.CacheDir, finalName)
-	tmpPath := finalPath + ".tmp"
-	_ = os.Remove(tmpPath)
 
 	img, err := crane.Pull(imagePath)
 	if err != nil {
@@ -192,24 +187,90 @@ func (s *Store) PullImage(_ context.Context, imagePath, expectedDigest string) (
 		return runspec.RunSpec{}, fmt.Errorf("image: image OS %q is not linux", cfg.OS)
 	}
 
-	initBin, err := s.loadInitBinary(cfg.Architecture)
-	if err != nil {
+	if err := s.buildInto(img, cfg, finalPath, finalPath+".tmp"); err != nil {
 		return runspec.RunSpec{}, err
 	}
+	return specFromConfig(cfg), nil
+}
+
+// Ensure resolves ref (pinned to platform) to a content-addressed read-only
+// squashfs rootfs, building it on first use and reusing the cached artifact
+// thereafter. It returns the artifact's on-disk path and the RunSpec distilled
+// from the image's OCI config.
+//
+// Unlike PullImage, Ensure does the digest resolution itself: a tag is resolved
+// to its manifest digest internally, so the same image always maps to the same
+// artifact file. The Firecracker runtime calls this at Provision time to obtain
+// the squashfs to attach as a read-only /dev/vda plus the RunSpec it publishes
+// into MMDS for the in-VM init (the RunSpec is never baked into the rootfs).
+//
+// A cache hit skips the (expensive) squashfs build but still returns the
+// RunSpec — deriving it costs only an image-config fetch, not the layer
+// download. The build is atomic (temp + rename) so a crash never leaves a
+// partial artifact that looks finished.
+func (s *Store) Ensure(ctx context.Context, ref string, platform *v1.Platform) (string, runspec.RunSpec, error) {
+	img, err := crane.Pull(ref, crane.WithContext(ctx), crane.WithPlatform(platform))
+	if err != nil {
+		return "", runspec.RunSpec{}, fmt.Errorf("pull %q: %w", ref, err)
+	}
+	dgst, err := img.Digest()
+	if err != nil {
+		return "", runspec.RunSpec{}, fmt.Errorf("read pulled digest: %w", err)
+	}
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		return "", runspec.RunSpec{}, fmt.Errorf("read image config: %w", err)
+	}
+	if cfg.OS != "linux" {
+		return "", runspec.RunSpec{}, fmt.Errorf("image: image OS %q is not linux", cfg.OS)
+	}
+
+	finalName, err := encodeRootfsName(dgst.String())
+	if err != nil {
+		return "", runspec.RunSpec{}, err
+	}
+	finalPath := filepath.Join(s.CacheDir, finalName)
+	spec := specFromConfig(cfg)
+
+	if _, err := os.Stat(finalPath); err == nil {
+		return finalPath, spec, nil // already prepared
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", runspec.RunSpec{}, fmt.Errorf("stat rootfs %q: %w", finalPath, err)
+	}
+
+	if err := s.buildInto(img, cfg, finalPath, finalPath+".tmp"); err != nil {
+		return "", runspec.RunSpec{}, err
+	}
+	return finalPath, spec, nil
+}
+
+// buildInto streams img's flattened layer tar through the squashfs writer into
+// tmpPath (injecting /.craftling/init for cfg.Architecture and the standard
+// mountpoints), then atomically renames it onto finalPath. The caller has
+// already validated the digest/OS; this is the shared build half of PullImage
+// and Ensure.
+func (s *Store) buildInto(img v1.Image, cfg *v1.ConfigFile, finalPath, tmpPath string) error {
+	if err := os.MkdirAll(s.CacheDir, 0o755); err != nil {
+		return fmt.Errorf("create cache dir %q: %w", s.CacheDir, err)
+	}
+	initBin, err := s.loadInitBinary(cfg.Architecture)
+	if err != nil {
+		return err
+	}
+	_ = os.Remove(tmpPath)
 
 	flat := mutate.Extract(img)
 	defer flat.Close()
 
 	if err := buildSquashfs(flat, initBin, tmpPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return runspec.RunSpec{}, err
+		return err
 	}
-
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return runspec.RunSpec{}, fmt.Errorf("publish rootfs %q: %w", finalPath, err)
+		return fmt.Errorf("publish rootfs %q: %w", finalPath, err)
 	}
-	return specFromConfig(cfg), nil
+	return nil
 }
 
 // PathFor returns the absolute on-disk path of the prepared rootfs for
