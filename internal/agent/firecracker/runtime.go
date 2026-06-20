@@ -38,6 +38,15 @@ type Runtime struct {
 	done    chan struct{}
 	sweepWG sync.WaitGroup
 
+	// baseCtx is the runtime's lifetime context, cancelled by Close. Long,
+	// idempotent work that must outlive the control-plane command that triggered
+	// it — notably the shared image build — derives from baseCtx instead of the
+	// per-command context, so a dropped/reconnected agent stream doesn't abort a
+	// half-finished build. Cancelling baseCtx at shutdown still tears those
+	// builds down.
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+
 	mu  sync.Mutex
 	vms map[string]*machine
 }
@@ -56,6 +65,7 @@ func New(cfg Config) (*Runtime, error) {
 	}
 
 	r := &Runtime{cfg: cfg, vms: make(map[string]*machine), done: make(chan struct{})}
+	r.baseCtx, r.baseCancel = context.WithCancel(context.Background())
 	if cfg.persistEnabled() {
 		r.store = cfg.WorldStore
 	}
@@ -89,6 +99,7 @@ func New(cfg Config) (*Runtime, error) {
 // Close stops the periodic snapshot sweep and tears down the NAT dataplane
 // (detaching all eBPF programs). It is safe to call when neither was enabled.
 func (r *Runtime) Close() {
+	r.baseCancel()
 	close(r.done)
 	r.sweepWG.Wait()
 	if r.dp != nil {
@@ -157,7 +168,15 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 	if err != nil {
 		return nil, err
 	}
-	rootfs, baseSpec, err := r.cfg.ImageStore.Ensure(ctx, ref, hostPlatform())
+	// Build the rootfs under the runtime's lifetime, not the command ctx: the
+	// build is content-addressed, idempotent, and shared across every VM booting
+	// this ref, so it must not die because this command's context was cancelled
+	// (a stream reconnect, a caller deadline). A cancelled provision then still
+	// leaves a populated cache for the next attempt instead of restarting from
+	// zero. ImagePullTimeout is the only deadline on a stuck pull.
+	imgCtx, cancelImg := context.WithTimeout(r.baseCtx, r.cfg.ImagePullTimeout)
+	defer cancelImg()
+	rootfs, baseSpec, err := r.cfg.ImageStore.Ensure(imgCtx, ref, hostPlatform())
 	if err != nil {
 		return nil, fmt.Errorf("firecracker: resolve image %q: %w", ref, err)
 	}

@@ -6,12 +6,36 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/image"
 	"github.com/aarani/craftling-go/internal/runspec"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
+
+// fakeEnsurer records the context its Ensure was invoked with, so a test can
+// assert the image build does not inherit the (cancellable) command context.
+// It returns errStop to abort Provision right after the build seam, before any
+// real microVM work.
+type fakeEnsurer struct {
+	errStop error
+
+	mu          sync.Mutex
+	called      bool
+	ctxErr      error
+	hasDeadline bool
+}
+
+func (f *fakeEnsurer) Ensure(ctx context.Context, _ string, _ *v1.Platform) (string, runspec.RunSpec, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+	f.ctxErr = ctx.Err()
+	_, f.hasDeadline = ctx.Deadline()
+	return "", runspec.RunSpec{}, f.errStop
+}
 
 // testImageStore returns an image.Store over a throwaway cache dir. The
 // non-KVM unit tests never actually convert an image (they stop before any
@@ -163,6 +187,49 @@ func TestProvisionRejectsInvalidSpec(t *testing.T) {
 		if _, err := rt.Provision(ctx, spec); err == nil {
 			t.Errorf("Provision(%+v): expected error", spec)
 		}
+	}
+}
+
+// TestProvisionImageBuildOutlivesCommandContext is the regression guard for the
+// "context canceled" provision failures: the shared, idempotent image build must
+// run under the runtime's lifetime, not the per-command context, so a cancelled
+// command (e.g. a dropped/reconnected agent stream) cannot abort a build
+// mid-stream. The fake ensurer records the context it was handed.
+func TestProvisionImageBuildOutlivesCommandContext(t *testing.T) {
+	dir := t.TempDir()
+	kernel := filepath.Join(dir, "vmlinux")
+	if err := os.WriteFile(kernel, []byte("kernel"), 0o600); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	fake := &fakeEnsurer{errStop: errors.New("stop after build seam")}
+	rt, err := New(Config{
+		KernelPath:    kernel,
+		ImageStore:    fake,
+		ImageRef:      "example.invalid/mc:{version}",
+		WorkDir:       filepath.Join(dir, "work"),
+		AdvertiseHost: "10.0.0.5",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer rt.Close()
+
+	// An already-cancelled command context — exactly what a dropped agent stream
+	// hands Provision mid-flight.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := rt.Provision(ctx, agent.VMSpec{Version: "1.20.4", CPUs: 2, MemoryMB: 1024}); err == nil {
+		t.Fatal("Provision: expected the fake ensurer's error")
+	}
+	if !fake.called {
+		t.Fatal("Ensure never ran: Provision aborted on the command ctx before the build")
+	}
+	if fake.ctxErr != nil {
+		t.Errorf("image build saw ctx.Err() = %v; want nil — it must not inherit the cancelled command context", fake.ctxErr)
+	}
+	if !fake.hasDeadline {
+		t.Error("image build ctx had no deadline; want ImagePullTimeout applied")
 	}
 }
 
