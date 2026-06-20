@@ -3,7 +3,6 @@ package provisioner
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/model"
@@ -16,29 +15,36 @@ import (
 // indicates a logic error rather than a transient condition.
 var ErrUnplaced = errors.New("server has no host assigned")
 
-// HostResolver looks up a host by id to find the agent's address. The in-memory
-// repository.HostRepository satisfies it.
-type HostResolver interface {
-	GetByID(ctx context.Context, id string) (*model.Host, error)
+// Commander delivers VM lifecycle commands to a host's agent over the agent's
+// live control-plane connection, keyed by host id. It replaces the old outbound
+// HTTP client: the control plane no longer dials agents, it pushes commands down
+// the stream each agent holds open. *agentlink.Hub satisfies it.
+type Commander interface {
+	Provision(ctx context.Context, hostID string, spec agent.VMSpec) (*agent.VM, error)
+	Start(ctx context.Context, hostID, vmID string) (*agent.VM, error)
+	Stop(ctx context.Context, hostID, vmID string) error
+	Snapshot(ctx context.Context, hostID, vmID string) error
+	Deprovision(ctx context.Context, hostID, vmID string) error
+	Status(ctx context.Context, hostID, vmID string) (*agent.VM, error)
 }
 
-// RemoteProvisioner implements Provisioner by calling the agent on the host the
-// scheduler assigned. The reconciler's calls keep the same shape as with Fake —
-// they just become a network hop to the host that actually runs the VM, honoring
-// the invariant that the control plane never touches KVM itself.
+// RemoteProvisioner implements Provisioner by sending commands to the agent on
+// the host the scheduler assigned. The reconciler's calls keep the same shape as
+// with Fake — they become a message down the host's open stream rather than an
+// in-process call, honoring the invariant that the control plane never touches
+// KVM itself.
 type RemoteProvisioner struct {
-	hosts  HostResolver
-	client *agent.Client
+	cmd Commander
 }
 
-// NewRemote constructs a RemoteProvisioner over a host resolver and agent client.
-func NewRemote(hosts HostResolver, client *agent.Client) *RemoteProvisioner {
-	return &RemoteProvisioner{hosts: hosts, client: client}
+// NewRemote constructs a RemoteProvisioner over a command channel (the hub).
+func NewRemote(cmd Commander) *RemoteProvisioner {
+	return &RemoteProvisioner{cmd: cmd}
 }
 
 // Provision asks the assigned host's agent to create and boot a VM.
 func (p *RemoteProvisioner) Provision(ctx context.Context, s *model.GameServer) (*Instance, error) {
-	base, err := p.baseURL(ctx, s)
+	hostID, err := assignedHost(s)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +65,7 @@ func (p *RemoteProvisioner) Provision(ctx context.Context, s *model.GameServer) 
 	if len(s.Env) > 0 {
 		spec.RunSpec = &runspec.RunSpec{Env: registry.SortedEnv(s.Env)}
 	}
-	vm, err := p.client.Provision(ctx, base, spec)
+	vm, err := p.cmd.Provision(ctx, hostID, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -72,11 +78,11 @@ func (p *RemoteProvisioner) Start(ctx context.Context, s *model.GameServer) (*In
 	if s.VMID == nil || *s.VMID == "" {
 		return p.Provision(ctx, s)
 	}
-	base, err := p.baseURL(ctx, s)
+	hostID, err := assignedHost(s)
 	if err != nil {
 		return nil, err
 	}
-	vm, err := p.client.Start(ctx, base, *s.VMID)
+	vm, err := p.cmd.Start(ctx, hostID, *s.VMID)
 	if err != nil {
 		return nil, err
 	}
@@ -88,11 +94,11 @@ func (p *RemoteProvisioner) Stop(ctx context.Context, s *model.GameServer) error
 	if s.VMID == nil || *s.VMID == "" {
 		return nil
 	}
-	base, err := p.baseURL(ctx, s)
+	hostID, err := assignedHost(s)
 	if err != nil {
 		return err
 	}
-	return p.client.Stop(ctx, base, *s.VMID)
+	return p.cmd.Stop(ctx, hostID, *s.VMID)
 }
 
 // Deprovision tears down the VM on its host (idempotent). A server that was
@@ -101,11 +107,7 @@ func (p *RemoteProvisioner) Deprovision(ctx context.Context, s *model.GameServer
 	if s.HostID == nil || *s.HostID == "" || s.VMID == nil || *s.VMID == "" {
 		return nil
 	}
-	base, err := p.baseURL(ctx, s)
-	if err != nil {
-		return err
-	}
-	return p.client.Deprovision(ctx, base, *s.VMID)
+	return p.cmd.Deprovision(ctx, *s.HostID, *s.VMID)
 }
 
 // Status reports the VM's observed state as seen by its host's agent.
@@ -113,11 +115,11 @@ func (p *RemoteProvisioner) Status(ctx context.Context, s *model.GameServer) (St
 	if s.VMID == nil || *s.VMID == "" {
 		return StateMissing, nil
 	}
-	base, err := p.baseURL(ctx, s)
+	hostID, err := assignedHost(s)
 	if err != nil {
 		return "", err
 	}
-	vm, err := p.client.Status(ctx, base, *s.VMID)
+	vm, err := p.cmd.Status(ctx, hostID, *s.VMID)
 	if err != nil {
 		return "", err
 	}
@@ -130,23 +132,19 @@ func (p *RemoteProvisioner) Snapshot(ctx context.Context, s *model.GameServer) e
 	if s.VMID == nil || *s.VMID == "" {
 		return nil
 	}
-	base, err := p.baseURL(ctx, s)
+	hostID, err := assignedHost(s)
 	if err != nil {
 		return err
 	}
-	return p.client.Snapshot(ctx, base, *s.VMID)
+	return p.cmd.Snapshot(ctx, hostID, *s.VMID)
 }
 
-// baseURL resolves the agent base URL for the server's assigned host.
-func (p *RemoteProvisioner) baseURL(ctx context.Context, s *model.GameServer) (string, error) {
+// assignedHost returns the server's assigned host id, or ErrUnplaced.
+func assignedHost(s *model.GameServer) (string, error) {
 	if s.HostID == nil || *s.HostID == "" {
 		return "", ErrUnplaced
 	}
-	h, err := p.hosts.GetByID(ctx, *s.HostID)
-	if err != nil {
-		return "", fmt.Errorf("resolve host %s: %w", *s.HostID, err)
-	}
-	return agent.BaseURL(h.Address), nil
+	return *s.HostID, nil
 }
 
 // instanceOf maps an agent VM to a provisioner Instance.

@@ -24,6 +24,31 @@ func TestRegisterReservedNewHost(t *testing.T) {
 	}
 }
 
+// TestMarkDown verifies a host is marked down on demand (the hub's
+// disconnect path), and that marking an unknown host is a harmless no-op.
+func TestMarkDown(t *testing.T) {
+	repo := NewHostRepository()
+	if _, err := repo.RegisterReserved(context.Background(), newHost("a", 4, 4096), 0, 0); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := repo.MarkDown(context.Background(), "a"); err != nil {
+		t.Fatalf("mark down: %v", err)
+	}
+	h, err := repo.GetByID(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if h.Status != model.HostDown {
+		t.Errorf("status = %q, want %q", h.Status, model.HostDown)
+	}
+
+	// Unknown host: no error (a control-plane restart can forget a host).
+	if err := repo.MarkDown(context.Background(), "ghost"); err != nil {
+		t.Errorf("mark down unknown = %v, want nil", err)
+	}
+}
+
 // TestRegisterReservedClampsNegative guards against a reconstructed reservation
 // exceeding the host's reported total (allocatable floors at zero).
 func TestRegisterReservedClampsNegative(t *testing.T) {

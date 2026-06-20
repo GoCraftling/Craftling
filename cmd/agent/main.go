@@ -1,6 +1,8 @@
-// Command agent is the host-side worker (P3). It exposes a VM API the control
-// plane calls to provision/start/stop/deprovision local VMs, and it registers +
-// heartbeats with the control plane so the scheduler can place servers on it.
+// Command agent is the host-side worker (P3). It dials the control plane and
+// holds a persistent gRPC stream open over which the control plane pushes VM
+// lifecycle commands (provision/start/stop/deprovision); the agent runs them
+// against its local Runtime and answers on the same stream. It has no inbound
+// API — the open stream both delivers commands and proves the host's liveness.
 //
 // It ships with the in-memory FakeRuntime; a real Firecracker driver (P4) slots
 // in behind the same Runtime interface without changing this wiring.
@@ -8,10 +10,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,15 +27,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// heartbeatInterval is how often the agent proves liveness to the control
-	// plane. It must be comfortably below the control plane's host TTL (30s).
-	heartbeatInterval = 10 * time.Second
-	// registerRetryInterval is how long to wait between registration attempts
-	// while the control plane is unreachable.
-	registerRetryInterval = 5 * time.Second
-)
-
 func main() {
 	cfg := config.Load()
 
@@ -45,57 +36,28 @@ func main() {
 	}
 	defer func() { _ = zlog.Sync() }()
 
-	advertiseAddr := cfg.Agent.AdvertiseAddr
-	if advertiseAddr == "" {
-		// Best-effort default so a local single-host run works out of the box.
-		advertiseAddr = "localhost:" + cfg.Port
-	}
-
-	// The runtime that actually runs VMs, fronted by the agent HTTP API.
+	// The runtime that actually runs VMs, driven by commands off the link.
 	rt, err := newRuntime(cfg, zlog)
 	if err != nil {
 		zlog.Fatal("init runtime", zap.Error(err))
-	}
-	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      agent.NewRouter(rt, zlog),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		zlog.Info("agent listening",
-			zap.String("port", cfg.Port), zap.String("advertise_addr", advertiseAddr))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			zlog.Fatal("agent listen failed", zap.Error(err))
-		}
-	}()
-
-	// Register with the control plane and keep the host alive via heartbeats.
-	cp := agent.NewCPClient(cfg.Agent.ControlPlaneURL, &http.Client{Timeout: 10 * time.Second})
-	go runRegistration(ctx, zlog, cp, agent.RegisterRequest{
+	// Hold a persistent connection to the control plane for the agent's lifetime.
+	// RunLink blocks until ctx is cancelled, reconnecting on its own if the stream
+	// drops, so this is the agent's main loop.
+	zlog.Info("connecting to control plane", zap.String("addr", cfg.Agent.ControlPlaneGRPCAddr))
+	agent.RunLink(ctx, cfg.Agent.ControlPlaneGRPCAddr, rt, agent.LinkInfo{
 		ID:            cfg.Agent.ID,
 		Hostname:      cfg.Agent.Hostname,
-		Address:       advertiseAddr,
 		Zone:          cfg.Agent.Zone,
+		AgentVersion:  cfg.Agent.Version,
 		CPUsTotal:     cfg.Agent.CPUsTotal,
 		MemoryMBTotal: cfg.Agent.MemoryMBTotal,
-		AgentVersion:  cfg.Agent.Version,
-	})
+	}, zlog)
 
-	<-ctx.Done()
-	stop()
-	zlog.Info("shutting down agent...")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		zlog.Fatal("forced shutdown", zap.Error(err))
-	}
 	zlog.Info("agent exited")
 }
 
@@ -160,58 +122,4 @@ func imageCacheDir(fc config.FirecrackerConfig) string {
 		workDir = filepath.Join(os.TempDir(), "craftling-fc")
 	}
 	return filepath.Join(workDir, "images")
-}
-
-// runRegistration registers the host then heartbeats on an interval until ctx is
-// cancelled. A heartbeat that the control plane rejects with "not found" (it was
-// restarted and forgot us) triggers a re-register, restoring the same identity.
-func runRegistration(ctx context.Context, log *zap.Logger, cp *agent.CPClient, req agent.RegisterRequest) {
-	id := register(ctx, log, cp, req)
-	if id == "" {
-		return // ctx cancelled before we registered
-	}
-	// Re-register under the assigned id so identity stays stable across restarts.
-	req.ID = id
-
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			found, err := cp.Heartbeat(ctx, id)
-			if err != nil {
-				log.Warn("heartbeat failed", zap.Error(err))
-				continue
-			}
-			if !found {
-				log.Warn("control plane forgot host; re-registering", zap.String("id", id))
-				if newID := register(ctx, log, cp, req); newID != "" {
-					id = newID
-					req.ID = newID
-				}
-			}
-		}
-	}
-}
-
-// register retries registration until it succeeds or ctx is cancelled,
-// returning the assigned host id (empty on cancellation).
-func register(ctx context.Context, log *zap.Logger, cp *agent.CPClient, req agent.RegisterRequest) string {
-	for {
-		id, err := cp.Register(ctx, req)
-		if err == nil {
-			log.Info("registered with control plane", zap.String("id", id))
-			return id
-		}
-		log.Warn("register failed; retrying", zap.Error(err))
-
-		select {
-		case <-ctx.Done():
-			return ""
-		case <-time.After(registerRetryInterval):
-		}
-	}
 }

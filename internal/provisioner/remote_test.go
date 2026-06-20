@@ -3,32 +3,79 @@ package provisioner
 import (
 	"context"
 	"errors"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/model"
-	"go.uber.org/zap"
 )
 
-// stubResolver resolves every host id to a fixed agent address.
-type stubResolver struct{ addr string }
+// fakeCommander routes commands to an in-process Runtime, ignoring the host id —
+// it stands in for the hub so the provisioner can be driven without a real gRPC
+// stream. It is the seam the control plane pushes commands through.
+type fakeCommander struct{ rt agent.Runtime }
 
-func (s stubResolver) GetByID(_ context.Context, id string) (*model.Host, error) {
-	return &model.Host{ID: id, Address: s.addr}, nil
+func (c fakeCommander) Provision(ctx context.Context, _ string, spec agent.VMSpec) (*agent.VM, error) {
+	return c.rt.Provision(ctx, spec)
+}
+func (c fakeCommander) Start(ctx context.Context, _, vmID string) (*agent.VM, error) {
+	return c.rt.Start(ctx, vmID)
+}
+func (c fakeCommander) Stop(ctx context.Context, _, vmID string) error {
+	return c.rt.Stop(ctx, vmID)
+}
+func (c fakeCommander) Snapshot(ctx context.Context, _, vmID string) error {
+	return c.rt.Snapshot(ctx, vmID)
+}
+func (c fakeCommander) Deprovision(ctx context.Context, _, vmID string) error {
+	return c.rt.Deprovision(ctx, vmID)
+}
+func (c fakeCommander) Status(ctx context.Context, _, vmID string) (*agent.VM, error) {
+	return c.rt.Status(ctx, vmID)
+}
+
+// errCommander fails loudly on every call, so a test can assert a code path is a
+// no-op that never reaches the command channel.
+type errCommander struct{ t *testing.T }
+
+func (c errCommander) Provision(context.Context, string, agent.VMSpec) (*agent.VM, error) {
+	c.t.Helper()
+	c.t.Fatal("Provision called, want no-op")
+	return nil, errors.New("unreachable")
+}
+func (c errCommander) Start(context.Context, string, string) (*agent.VM, error) {
+	c.t.Helper()
+	c.t.Fatal("Start called, want no-op")
+	return nil, errors.New("unreachable")
+}
+func (c errCommander) Stop(context.Context, string, string) error {
+	c.t.Helper()
+	c.t.Fatal("Stop called, want no-op")
+	return nil
+}
+func (c errCommander) Snapshot(context.Context, string, string) error {
+	c.t.Helper()
+	c.t.Fatal("Snapshot called, want no-op")
+	return nil
+}
+func (c errCommander) Deprovision(context.Context, string, string) error {
+	c.t.Helper()
+	c.t.Fatal("Deprovision called, want no-op")
+	return nil
+}
+func (c errCommander) Status(context.Context, string, string) (*agent.VM, error) {
+	c.t.Helper()
+	c.t.Fatal("Status called, want no-op")
+	return nil, errors.New("unreachable")
 }
 
 func ptr(s string) *string { return &s }
 
 // TestRemoteProvisionerLifecycle drives a game server through provision → stop →
-// start → deprovision against a real in-process agent, asserting the observed
-// state reported back across the seam at each step.
+// start → deprovision against an in-process runtime behind the command channel,
+// asserting the observed state reported back at each step.
 func TestRemoteProvisionerLifecycle(t *testing.T) {
 	ctx := context.Background()
-	srv := httptest.NewServer(agent.NewRouter(agent.NewFakeRuntime("10.0.0.20"), zap.NewNop()))
-	defer srv.Close()
-
-	p := NewRemote(stubResolver{addr: srv.URL}, agent.NewClient(nil))
+	p := NewRemote(fakeCommander{rt: agent.NewFakeRuntime("10.0.0.20")})
 	s := &model.GameServer{
 		ID:       "srv-1",
 		HostID:   ptr("host-1"),
@@ -67,15 +114,15 @@ func TestRemoteProvisionerLifecycle(t *testing.T) {
 
 // TestRemoteProvisionerUnplaced verifies provisioning without a host assignment
 // is a logic error, while teardown of an unplaced/unprovisioned server is a
-// harmless no-op.
+// harmless no-op that never reaches the command channel.
 func TestRemoteProvisionerUnplaced(t *testing.T) {
 	ctx := context.Background()
-	p := NewRemote(stubResolver{addr: "http://127.0.0.1:1"}, agent.NewClient(nil))
+	p := NewRemote(errCommander{t: t})
 
 	if _, err := p.Provision(ctx, &model.GameServer{ID: "x"}); !errors.Is(err, ErrUnplaced) {
 		t.Errorf("provision unplaced = %v, want ErrUnplaced", err)
 	}
-	// No host and no VM: nothing to tear down, and we must not dial anyone.
+	// No host and no VM: nothing to tear down, and we must not send a command.
 	if err := p.Deprovision(ctx, &model.GameServer{ID: "x"}); err != nil {
 		t.Errorf("deprovision unplaced = %v, want nil", err)
 	}
@@ -88,10 +135,7 @@ func TestRemoteProvisionerUnplaced(t *testing.T) {
 // back to provisioning a fresh one.
 func TestRemoteProvisionerStartProvisions(t *testing.T) {
 	ctx := context.Background()
-	srv := httptest.NewServer(agent.NewRouter(agent.NewFakeRuntime("10.0.0.21"), zap.NewNop()))
-	defer srv.Close()
-
-	p := NewRemote(stubResolver{addr: srv.URL}, agent.NewClient(nil))
+	p := NewRemote(fakeCommander{rt: agent.NewFakeRuntime("10.0.0.21")})
 	s := &model.GameServer{ID: "srv-2", HostID: ptr("host-2"), Version: "1.20.4", CPUs: 1, MemoryMB: 1024}
 
 	inst, err := p.Start(ctx, s)
@@ -104,14 +148,10 @@ func TestRemoteProvisionerStartProvisions(t *testing.T) {
 }
 
 // TestRemoteProvisionerSnapshot verifies a snapshot of a provisioned server is
-// forwarded to its host's agent, and that a server with no VM is a no-op (no
-// dial).
+// forwarded to its host's agent, and that a server with no VM is a no-op.
 func TestRemoteProvisionerSnapshot(t *testing.T) {
 	ctx := context.Background()
-	srv := httptest.NewServer(agent.NewRouter(agent.NewFakeRuntime("10.0.0.22"), zap.NewNop()))
-	defer srv.Close()
-
-	p := NewRemote(stubResolver{addr: srv.URL}, agent.NewClient(nil))
+	p := NewRemote(fakeCommander{rt: agent.NewFakeRuntime("10.0.0.22")})
 	s := &model.GameServer{ID: "srv-3", HostID: ptr("host-3"), Version: "1.20.4", CPUs: 1, MemoryMB: 1024}
 
 	inst, err := p.Provision(ctx, s)
@@ -123,9 +163,8 @@ func TestRemoteProvisionerSnapshot(t *testing.T) {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	// No VM: nothing to snapshot, and we must not dial anyone (the resolver
-	// points at an unroutable address, so a dial would error).
-	dead := NewRemote(stubResolver{addr: "http://127.0.0.1:1"}, agent.NewClient(nil))
+	// No VM: nothing to snapshot, and we must not send a command.
+	dead := NewRemote(errCommander{t: t})
 	if err := dead.Snapshot(ctx, &model.GameServer{ID: "x", HostID: ptr("h")}); err != nil {
 		t.Errorf("snapshot with no vm = %v, want nil", err)
 	}
@@ -149,10 +188,7 @@ func (r *recordingRuntime) Provision(ctx context.Context, spec agent.VMSpec) (*a
 func TestRemoteProvisionerDeliversTemplate(t *testing.T) {
 	ctx := context.Background()
 	rt := &recordingRuntime{FakeRuntime: agent.NewFakeRuntime("10.0.0.30")}
-	srv := httptest.NewServer(agent.NewRouter(rt, zap.NewNop()))
-	defer srv.Close()
-
-	p := NewRemote(stubResolver{addr: srv.URL}, agent.NewClient(nil))
+	p := NewRemote(fakeCommander{rt: rt})
 
 	imageRef := "itzg/minecraft-server:java21"
 	tmpl := &model.GameServer{

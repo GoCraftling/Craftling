@@ -38,6 +38,10 @@ services:
       ADMIN_PASSWORD: adminpassword
     ports:
       - "8082:8080"
+    # The gRPC AgentLink listener (default :8090) is reachable to agents over the
+    # compose network; no host publish is needed.
+    expose:
+      - "8090"
     depends_on:
       db:
         condition: service_healthy
@@ -66,11 +70,11 @@ services:
       dockerfile: Dockerfile.agent
     environment:
       MODE: agent
-      PORT: "9000"
       APP_ENV: production
-      CONTROL_PLANE_URL: http://server:8080
-      # Address the control plane calls back (reachable on the compose network).
-      ADVERTISE_ADDR: agent:9000
+      # The agent dials this and holds a stream open; the control plane pushes VM
+      # commands down it. No inbound address is advertised — the control plane
+      # never dials the agent.
+      CONTROL_PLANE_GRPC_ADDR: server:8090
       # Player-facing connect host VMs report (override for real connectivity).
       ADVERTISE_HOST: 127.0.0.1
       AGENT_RUNTIME: firecracker
@@ -90,9 +94,8 @@ services:
     privileged: true
     volumes:
       - ./fc-assets:/var/lib/craftling
-    ports:
-      # Exposed for debugging the agent API directly.
-      - "9000:9000"
+    # No published ports: the agent serves no inbound API. It reaches the control
+    # plane's gRPC link at server:8090 over the compose network.
     depends_on:
       - server
     restart: unless-stopped

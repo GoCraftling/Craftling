@@ -203,6 +203,24 @@ func (r *HostRepository) Release(_ context.Context, id string, cpus, memMB int) 
 	return nil
 }
 
+// MarkDown marks a single host down, the immediate counterpart to MarkStale:
+// the hub calls it the moment an agent's stream drops, so a disconnected host
+// stops being scheduled without waiting for its heartbeat TTL to lapse. An
+// unknown host is a no-op (the fleet lives in memory; a control-plane restart
+// can legitimately forget a host that later reconnects).
+func (r *HostRepository) MarkDown(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	h, ok := r.hosts[id]
+	if !ok || h.Status == model.HostDown {
+		return nil
+	}
+	h.Status = model.HostDown
+	h.UpdatedAt = now()
+	return nil
+}
+
 // MarkStale marks every host whose last heartbeat predates cutoff as down, and
 // returns how many transitioned. Already-down hosts are left untouched.
 func (r *HostRepository) MarkStale(_ context.Context, cutoff time.Time) (int, error) {
