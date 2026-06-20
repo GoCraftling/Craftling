@@ -23,8 +23,9 @@ const (
 	StateMissing = "missing"
 )
 
-// defaultMinecraftPort is the in-VM Minecraft server port. Per-server host port
-// allocation arrives in P6; until then every VM uses the standard port.
+// defaultMinecraftPort is the standard Minecraft port and the base of the fake
+// runtime's per-VM host-port pool: the first VM on a host binds it and each
+// subsequent VM gets the next free port up, so no two share one.
 const defaultMinecraftPort = 25565
 
 // ErrVMNotFound means the runtime has no VM with the requested id. Stop and
@@ -111,8 +112,9 @@ type FakeRuntime struct {
 	cpusTotal  int
 	memMBTotal int
 
-	mu  sync.Mutex
-	vms map[string]*fakeVM
+	mu        sync.Mutex
+	vms       map[string]*fakeVM
+	usedPorts map[int]struct{} // host ports currently bound by a live VM
 }
 
 // fakeVM is a simulated VM plus the host resources it holds. A provisioned VM
@@ -141,7 +143,11 @@ func NewFakeRuntime(advertiseHost string, opts ...FakeOption) *FakeRuntime {
 	if advertiseHost == "" {
 		advertiseHost = "127.0.0.1"
 	}
-	r := &FakeRuntime{advertiseHost: advertiseHost, vms: make(map[string]*fakeVM)}
+	r := &FakeRuntime{
+		advertiseHost: advertiseHost,
+		vms:           make(map[string]*fakeVM),
+		usedPorts:     make(map[int]struct{}),
+	}
 	for _, opt := range opts {
 		opt(r)
 	}
@@ -161,11 +167,23 @@ func (r *FakeRuntime) Provision(_ context.Context, spec VMSpec) (*VM, error) {
 		ID:       "vm-" + uuid.NewString(),
 		ServerID: spec.ServerID,
 		Host:     r.advertiseHost,
-		Port:     defaultMinecraftPort,
+		Port:     r.allocatePortLocked(),
 		State:    StateRunning,
 	}
 	r.vms[vm.ID] = &fakeVM{vm: vm, cpus: spec.CPUs, memMB: spec.MemoryMB}
 	return clone(vm), nil
+}
+
+// allocatePortLocked hands out the lowest free host port at or above the
+// standard Minecraft port, so every VM on a host binds a distinct public port
+// rather than colliding on 25565. Caller holds r.mu.
+func (r *FakeRuntime) allocatePortLocked() int {
+	for p := defaultMinecraftPort; ; p++ {
+		if _, used := r.usedPorts[p]; !used {
+			r.usedPorts[p] = struct{}{}
+			return p
+		}
+	}
 }
 
 // fitsLocked reports whether a VM needing cpus/memMB fits the host's remaining
@@ -210,12 +228,16 @@ func (r *FakeRuntime) Stop(_ context.Context, vmID string) error {
 	return nil
 }
 
-// Deprovision destroys a VM, freeing its capacity. Unknown VM is a no-op.
+// Deprovision destroys a VM, freeing its capacity and host port. Unknown VM is
+// a no-op.
 func (r *FakeRuntime) Deprovision(_ context.Context, vmID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.vms, vmID)
+	if fv, ok := r.vms[vmID]; ok {
+		delete(r.usedPorts, fv.vm.Port)
+		delete(r.vms, vmID)
+	}
 	return nil
 }
 

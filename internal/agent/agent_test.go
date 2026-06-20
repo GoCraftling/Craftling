@@ -77,6 +77,42 @@ func TestFakeRuntimeRefusesOvercommit(t *testing.T) {
 	}
 }
 
+// TestFakeRuntimeUniquePorts verifies two servers on one host never bind the
+// same host port, and that a freed port is reused after deprovision.
+func TestFakeRuntimeUniquePorts(t *testing.T) {
+	ctx := context.Background()
+	rt := NewFakeRuntime("10.0.0.7")
+
+	a, err := rt.Provision(ctx, VMSpec{ServerID: "a", CPUs: 1, MemoryMB: 512})
+	if err != nil {
+		t.Fatalf("provision a: %v", err)
+	}
+	b, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 1, MemoryMB: 512})
+	if err != nil {
+		t.Fatalf("provision b: %v", err)
+	}
+	if a.Port == b.Port {
+		t.Fatalf("two servers on one host share port %d", a.Port)
+	}
+	if a.Port != defaultMinecraftPort {
+		t.Errorf("first port = %d, want %d", a.Port, defaultMinecraftPort)
+	}
+	// Freeing a's port lets a new VM reuse it.
+	if err := rt.Deprovision(ctx, a.ID); err != nil {
+		t.Fatalf("deprovision a: %v", err)
+	}
+	c, err := rt.Provision(ctx, VMSpec{ServerID: "c", CPUs: 1, MemoryMB: 512})
+	if err != nil {
+		t.Fatalf("provision c: %v", err)
+	}
+	if c.Port != a.Port {
+		t.Errorf("reused port = %d, want freed %d", c.Port, a.Port)
+	}
+	if c.Port == b.Port {
+		t.Fatalf("reuse collided with live port %d", b.Port)
+	}
+}
+
 // TestFakeRuntimeUnlimitedByDefault verifies that without a configured capacity
 // the runtime imposes no limit (preserving its plain stand-in behavior).
 func TestFakeRuntimeUnlimitedByDefault(t *testing.T) {
