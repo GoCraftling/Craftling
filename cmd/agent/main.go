@@ -91,6 +91,8 @@ func newRuntime(cfg *config.Config, log *zap.Logger) (agent.Runtime, error) {
 			DefaultImageRef:  cfg.Agent.Firecracker.DefaultImageRef,
 			WorkDir:          cfg.Agent.Firecracker.WorkDir,
 			AdvertiseHost:    cfg.Agent.AdvertiseHost,
+			CPUsTotal:        cfg.Agent.CPUsTotal,
+			MemoryMBTotal:    cfg.Agent.MemoryMBTotal,
 			WorldPersistence: cfg.Agent.Firecracker.WorldPersistence,
 			DataDir:          cfg.Agent.Firecracker.DataDir,
 			WorldDiskMB:      cfg.Agent.Firecracker.WorldDiskMB,
@@ -103,7 +105,8 @@ func newRuntime(cfg *config.Config, log *zap.Logger) (agent.Runtime, error) {
 		})
 	case config.RuntimeFake, "":
 		log.Info("using fake runtime")
-		return agent.NewFakeRuntime(cfg.Agent.AdvertiseHost), nil
+		return agent.NewFakeRuntime(cfg.Agent.AdvertiseHost,
+			agent.WithCapacity(cfg.Agent.CPUsTotal, cfg.Agent.MemoryMBTotal)), nil
 	default:
 		return nil, fmt.Errorf("unknown agent runtime %q", cfg.Agent.Runtime)
 	}

@@ -32,6 +32,14 @@ const defaultMinecraftPort = 25565
 // surface it so the caller can tell a stopped VM from a vanished one.
 var ErrVMNotFound = errors.New("vm not found")
 
+// ErrInsufficientCapacity means the host lacks free cpu/memory to run a VM. A
+// host agent is the authority over its own physical resources, so it refuses to
+// boot a VM that would overcommit the host even if the control plane asked for
+// it — the scheduler's in-memory view can drift (e.g. across a restart), and a
+// host must never run more than it has. The control-plane scheduler is the
+// primary guard; this is the host's own backstop.
+var ErrInsufficientCapacity = errors.New("insufficient host capacity")
+
 // VMSpec is what the control plane asks an agent to run. It is the VM-level view
 // of a game server, deliberately decoupled from model.GameServer.
 type VMSpec struct {
@@ -97,23 +105,58 @@ type Runtime interface {
 type FakeRuntime struct {
 	advertiseHost string
 
+	// cpusTotal/memMBTotal cap how much the host will admit. A zero total means
+	// that dimension is unlimited — the default for tests that don't exercise
+	// capacity. The real agent passes its configured host capacity.
+	cpusTotal  int
+	memMBTotal int
+
 	mu  sync.Mutex
-	vms map[string]*VM
+	vms map[string]*fakeVM
+}
+
+// fakeVM is a simulated VM plus the host resources it holds. A provisioned VM
+// occupies its cpu/memory until it is deprovisioned, even while stopped —
+// mirroring a real host, where a halted VM keeps its slot.
+type fakeVM struct {
+	vm    *VM
+	cpus  int
+	memMB int
+}
+
+// FakeOption configures a FakeRuntime.
+type FakeOption func(*FakeRuntime)
+
+// WithCapacity caps the host's admittable cpu/memory so the runtime refuses to
+// overcommit itself. A zero total leaves that dimension unlimited.
+func WithCapacity(cpusTotal, memMBTotal int) FakeOption {
+	return func(r *FakeRuntime) {
+		r.cpusTotal = cpusTotal
+		r.memMBTotal = memMBTotal
+	}
 }
 
 // NewFakeRuntime constructs a FakeRuntime advertising the given connect host.
-func NewFakeRuntime(advertiseHost string) *FakeRuntime {
+func NewFakeRuntime(advertiseHost string, opts ...FakeOption) *FakeRuntime {
 	if advertiseHost == "" {
 		advertiseHost = "127.0.0.1"
 	}
-	return &FakeRuntime{advertiseHost: advertiseHost, vms: make(map[string]*VM)}
+	r := &FakeRuntime{advertiseHost: advertiseHost, vms: make(map[string]*fakeVM)}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
-// Provision mints a new running VM for the spec.
+// Provision mints a new running VM for the spec, refusing to overcommit the
+// host's capacity.
 func (r *FakeRuntime) Provision(_ context.Context, spec VMSpec) (*VM, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if err := r.fitsLocked(spec.CPUs, spec.MemoryMB); err != nil {
+		return nil, err
+	}
 	vm := &VM{
 		ID:       "vm-" + uuid.NewString(),
 		ServerID: spec.ServerID,
@@ -121,8 +164,26 @@ func (r *FakeRuntime) Provision(_ context.Context, spec VMSpec) (*VM, error) {
 		Port:     defaultMinecraftPort,
 		State:    StateRunning,
 	}
-	r.vms[vm.ID] = vm
+	r.vms[vm.ID] = &fakeVM{vm: vm, cpus: spec.CPUs, memMB: spec.MemoryMB}
 	return clone(vm), nil
+}
+
+// fitsLocked reports whether a VM needing cpus/memMB fits the host's remaining
+// capacity, returning ErrInsufficientCapacity if not. A zero total leaves that
+// dimension unconstrained. Caller holds r.mu.
+func (r *FakeRuntime) fitsLocked(cpus, memMB int) error {
+	var usedCPUs, usedMem int
+	for _, fv := range r.vms {
+		usedCPUs += fv.cpus
+		usedMem += fv.memMB
+	}
+	if r.cpusTotal > 0 && usedCPUs+cpus > r.cpusTotal {
+		return ErrInsufficientCapacity
+	}
+	if r.memMBTotal > 0 && usedMem+memMB > r.memMBTotal {
+		return ErrInsufficientCapacity
+	}
+	return nil
 }
 
 // Start boots an existing VM back to running.
@@ -130,12 +191,12 @@ func (r *FakeRuntime) Start(_ context.Context, vmID string) (*VM, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	vm, ok := r.vms[vmID]
+	fv, ok := r.vms[vmID]
 	if !ok {
 		return nil, ErrVMNotFound
 	}
-	vm.State = StateRunning
-	return clone(vm), nil
+	fv.vm.State = StateRunning
+	return clone(fv.vm), nil
 }
 
 // Stop halts a VM, keeping it. Unknown VM is treated as already gone.
@@ -143,13 +204,13 @@ func (r *FakeRuntime) Stop(_ context.Context, vmID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if vm, ok := r.vms[vmID]; ok {
-		vm.State = StateStopped
+	if fv, ok := r.vms[vmID]; ok {
+		fv.vm.State = StateStopped
 	}
 	return nil
 }
 
-// Deprovision destroys a VM. Unknown VM is a no-op.
+// Deprovision destroys a VM, freeing its capacity. Unknown VM is a no-op.
 func (r *FakeRuntime) Deprovision(_ context.Context, vmID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -163,8 +224,8 @@ func (r *FakeRuntime) Status(_ context.Context, vmID string) (*VM, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if vm, ok := r.vms[vmID]; ok {
-		return clone(vm), nil
+	if fv, ok := r.vms[vmID]; ok {
+		return clone(fv.vm), nil
 	}
 	return &VM{ID: vmID, State: StateMissing}, nil
 }

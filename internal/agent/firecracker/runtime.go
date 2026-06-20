@@ -159,6 +159,12 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 	if spec.CPUs <= 0 || spec.MemoryMB <= 0 {
 		return nil, fmt.Errorf("firecracker: invalid spec: cpus=%d memory_mb=%d", spec.CPUs, spec.MemoryMB)
 	}
+	// Refuse to overcommit the host before doing any expensive build/boot work.
+	// The control-plane scheduler is the primary capacity guard; this is the
+	// host's own backstop for when its view drifts (e.g. across a restart).
+	if err := r.checkCapacity(spec.CPUs, spec.MemoryMB); err != nil {
+		return nil, err
+	}
 
 	// Resolve and (on first use) build the content-addressed read-only squashfs
 	// rootfs for this server's image, and take the RunSpec the converter
@@ -289,6 +295,28 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 	r.vms[id] = m
 	r.mu.Unlock()
 	return r.vmView(m), nil
+}
+
+// checkCapacity reports whether a VM needing cpus/memMB fits the host's
+// remaining capacity, returning agent.ErrInsufficientCapacity if not. A live VM
+// holds its slot whether running or stopped, so every tracked VM counts. A zero
+// configured total leaves that dimension unconstrained.
+func (r *Runtime) checkCapacity(cpus, memMB int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var usedCPUs, usedMem int
+	for _, m := range r.vms {
+		usedCPUs += m.vcpus
+		usedMem += m.memoryMB
+	}
+	if r.cfg.CPUsTotal > 0 && usedCPUs+cpus > r.cfg.CPUsTotal {
+		return agent.ErrInsufficientCapacity
+	}
+	if r.cfg.MemoryMBTotal > 0 && usedMem+memMB > r.cfg.MemoryMBTotal {
+		return agent.ErrInsufficientCapacity
+	}
+	return nil
 }
 
 // Start re-boots a stopped VM from its existing rootfs. It is a no-op for an

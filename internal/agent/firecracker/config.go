@@ -82,6 +82,14 @@ type Config struct {
 	// BootArgs overrides the kernel command line. Empty uses DefaultBootArgs.
 	BootArgs string
 
+	// CPUsTotal / MemoryMBTotal are the host's total schedulable capacity, the
+	// same figures the agent advertises to the control-plane scheduler. The
+	// runtime refuses to boot a VM that would push the sum of its live VMs past
+	// either total, so a host never overcommits itself even if the scheduler's
+	// in-memory view drifts. A zero total leaves that dimension unconstrained.
+	CPUsTotal     int
+	MemoryMBTotal int
+
 	// UplinkDevice is the host NIC the NAT dataplane attaches to for egress
 	// SNAT and inbound DNAT (e.g. "eth0", "ens5"). When empty the NAT dataplane
 	// is disabled and VMs get MMDS-only networking as before — every other

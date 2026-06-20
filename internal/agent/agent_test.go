@@ -47,6 +47,48 @@ func TestFakeRuntimeLifecycle(t *testing.T) {
 	assertState(t, rt, vm.ID, StateMissing)
 }
 
+// TestFakeRuntimeRefusesOvercommit verifies a capacity-bounded host agent will
+// not boot a VM that would exceed its total: two 4/8192 servers cannot both run
+// on a single 4/8192 host. Deprovisioning the first frees the slot for another.
+func TestFakeRuntimeRefusesOvercommit(t *testing.T) {
+	ctx := context.Background()
+	rt := NewFakeRuntime("10.0.0.7", WithCapacity(4, 8192))
+
+	first, err := rt.Provision(ctx, VMSpec{ServerID: "a", CPUs: 4, MemoryMB: 8192})
+	if err != nil {
+		t.Fatalf("first 4/8192 should fit a 4/8192 host: %v", err)
+	}
+	if _, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192}); !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("second provision err = %v, want ErrInsufficientCapacity", err)
+	}
+	// A stopped VM keeps its slot, so it still cannot fit a second.
+	if err := rt.Stop(ctx, first.ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192}); !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("provision over a stopped VM err = %v, want ErrInsufficientCapacity", err)
+	}
+	// Deprovisioning frees the capacity.
+	if err := rt.Deprovision(ctx, first.ID); err != nil {
+		t.Fatalf("deprovision: %v", err)
+	}
+	if _, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192}); err != nil {
+		t.Fatalf("provision after deprovision should fit: %v", err)
+	}
+}
+
+// TestFakeRuntimeUnlimitedByDefault verifies that without a configured capacity
+// the runtime imposes no limit (preserving its plain stand-in behavior).
+func TestFakeRuntimeUnlimitedByDefault(t *testing.T) {
+	ctx := context.Background()
+	rt := NewFakeRuntime("10.0.0.7")
+	for i := 0; i < 5; i++ {
+		if _, err := rt.Provision(ctx, VMSpec{CPUs: 8, MemoryMB: 16384}); err != nil {
+			t.Fatalf("provision %d under unlimited capacity: %v", i, err)
+		}
+	}
+}
+
 // TestFakeRuntimeIdempotency covers the edges the control plane relies on.
 func TestFakeRuntimeIdempotency(t *testing.T) {
 	ctx := context.Background()
