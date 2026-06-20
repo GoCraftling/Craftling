@@ -4,6 +4,7 @@ import { AppShell, type Route } from "@/components/app-shell"
 import { AuthScreen } from "@/components/auth-screen"
 import { ServersView } from "@/components/servers-view"
 import { MarketplaceView } from "@/components/marketplace-view"
+import { HostsView } from "@/components/hosts-view"
 import { StubView } from "@/components/stub-view"
 import { Icon } from "@/components/icon"
 import { usePersist } from "@/lib/use-persist"
@@ -52,6 +53,8 @@ export function App() {
         <ServersView role={role} onCountChange={setServerCount} />
       ) : route === "marketplace" ? (
         <MarketplaceView onLaunched={() => setRoute("servers")} />
+      ) : route === "hosts" ? (
+        <HostsView />
       ) : (
         <StubView route={route} />
       )}
