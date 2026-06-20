@@ -25,11 +25,6 @@ type Config struct {
 	AccessTTL   time.Duration
 	RefreshTTL  time.Duration
 
-	// GRPCPort is the control plane's gRPC AgentLink listener (ModeServer). It
-	// is separate from the HTTP API on Port: agents dial it and hold a stream
-	// open for the control plane to push VM commands down.
-	GRPCPort string
-
 	// TemplateIndexURL is the registry/marketplace index the control plane fetches
 	// the list of game-server templates from.
 	TemplateIndexURL string
@@ -38,9 +33,8 @@ type Config struct {
 	AdminEmail    string
 	AdminPassword string
 
-	// Agent configuration (ModeAgent only). The host worker dials the control
-	// plane and holds a stream open over which the control plane pushes VM
-	// commands; the agent never exposes an inbound API.
+	// Agent configuration (ModeAgent only). The host worker registers with the
+	// control plane and exposes its VM API for the control plane to call back.
 	Agent AgentConfig
 }
 
@@ -53,9 +47,8 @@ const (
 
 // AgentConfig holds the host-worker settings used when Mode == ModeAgent.
 type AgentConfig struct {
-	// ControlPlaneGRPCAddr is the control plane's gRPC AgentLink address
-	// (host:port) the agent dials and keeps a stream open to.
-	ControlPlaneGRPCAddr string
+	// ControlPlaneURL is where the agent registers and heartbeats.
+	ControlPlaneURL string
 	// Runtime selects the VM backend: "fake" (default) or "firecracker".
 	Runtime string
 	// Firecracker holds the real-microVM driver settings (Runtime == "firecracker").
@@ -64,6 +57,9 @@ type AgentConfig struct {
 	ID string
 	// Hostname identifies the host in the fleet view.
 	Hostname string
+	// AdvertiseAddr is the agent's own API address the control plane calls back
+	// (host:port reachable from the control plane).
+	AdvertiseAddr string
 	// AdvertiseHost is the player-facing connect address VMs report.
 	AdvertiseHost string
 	// Zone is an optional placement/locality label.
@@ -152,7 +148,6 @@ func Load() *Config {
 		JWTSecret:   getEnv("JWT_SECRET", "dev-secret-change-me"),
 		AccessTTL:   getDurationEnv("ACCESS_TTL", 15*time.Minute),
 		RefreshTTL:  getDurationEnv("REFRESH_TTL", 30*24*time.Hour),
-		GRPCPort:    getEnv("GRPC_PORT", "8090"),
 
 		TemplateIndexURL: getEnv("TEMPLATE_INDEX_URL", "https://registry.craftling.io/manifest.json"),
 
@@ -160,8 +155,8 @@ func Load() *Config {
 		AdminPassword: getEnv("ADMIN_PASSWORD", ""),
 
 		Agent: AgentConfig{
-			ControlPlaneGRPCAddr: getEnv("CONTROL_PLANE_GRPC_ADDR", "localhost:8090"),
-			Runtime:              getEnv("AGENT_RUNTIME", RuntimeFake),
+			ControlPlaneURL: getEnv("CONTROL_PLANE_URL", "http://localhost:8080"),
+			Runtime:         getEnv("AGENT_RUNTIME", RuntimeFake),
 			Firecracker: FirecrackerConfig{
 				BinaryPath:       getEnv("FC_BINARY", ""),
 				KernelPath:       getEnv("FC_KERNEL", ""),
@@ -191,6 +186,7 @@ func Load() *Config {
 			},
 			ID:            getEnv("AGENT_ID", ""),
 			Hostname:      getEnv("AGENT_HOSTNAME", defaultHostname()),
+			AdvertiseAddr: getEnv("ADVERTISE_ADDR", ""),
 			AdvertiseHost: getEnv("ADVERTISE_HOST", "127.0.0.1"),
 			Zone:          getEnv("ZONE", ""),
 			Version:       getEnv("AGENT_VERSION", "0.1.0"),

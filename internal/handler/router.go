@@ -36,6 +36,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 	// The scheduler is stateless over the shared in-memory host inventory, so the
 	// handler builds its own; the reconciler builds another over the same store.
 	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo), registryClient)
+	agentHandler := NewAgentHandler(hostRepo, gameServerRepo)
 	templateHandler := NewTemplateHandler(registryClient)
 
 	r := gin.New()
@@ -89,9 +90,14 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 			admin.GET("/hosts", adminHandler.ListHosts)
 		}
 
-		// Hosts no longer register/heartbeat over HTTP: each agent holds a
-		// persistent gRPC stream to the control plane (see internal/agentlink),
-		// which both delivers commands and serves as the host's liveness signal.
+		// Agent-facing routes. Hosts register and heartbeat here. Auth is a
+		// placeholder until P10 (per-host tokens / mTLS).
+		agent := api.Group("/agent")
+		agent.Use(middleware.AgentAuth())
+		{
+			agent.POST("/hosts/register", agentHandler.Register)
+			agent.POST("/hosts/:id/heartbeat", agentHandler.Heartbeat)
+		}
 	}
 
 	return r
