@@ -131,6 +131,62 @@ func TestRemoteProvisionerSnapshot(t *testing.T) {
 	}
 }
 
+// recordingRuntime captures the last VMSpec it was asked to provision so a test
+// can assert what crossed the control-plane → agent seam.
+type recordingRuntime struct {
+	*agent.FakeRuntime
+	last agent.VMSpec
+}
+
+func (r *recordingRuntime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, error) {
+	r.last = spec
+	return r.FakeRuntime.Provision(ctx, spec)
+}
+
+// TestRemoteProvisionerDeliversTemplate verifies a template-launched server's
+// image ref and resolved env are threaded into the VMSpec, while a direct server
+// leaves them empty.
+func TestRemoteProvisionerDeliversTemplate(t *testing.T) {
+	ctx := context.Background()
+	rt := &recordingRuntime{FakeRuntime: agent.NewFakeRuntime("10.0.0.30")}
+	srv := httptest.NewServer(agent.NewRouter(rt, zap.NewNop()))
+	defer srv.Close()
+
+	p := NewRemote(stubResolver{addr: srv.URL}, agent.NewClient(nil))
+
+	imageRef := "itzg/minecraft-server:java21"
+	tmpl := &model.GameServer{
+		ID: "srv-t", HostID: ptr("host-t"), Game: "minecraft", Version: "java21",
+		CPUs: 2, MemoryMB: 2048,
+		ImageRef: &imageRef,
+		Env:      map[string]string{"DIFFICULTY": "hard", "EULA": "TRUE"},
+	}
+	if _, err := p.Provision(ctx, tmpl); err != nil {
+		t.Fatalf("provision template: %v", err)
+	}
+	if rt.last.ImageRef != imageRef {
+		t.Errorf("VMSpec.ImageRef = %q, want %q", rt.last.ImageRef, imageRef)
+	}
+	if rt.last.RunSpec == nil {
+		t.Fatalf("VMSpec.RunSpec is nil, want resolved env")
+	}
+	// SortedEnv -> deterministic order.
+	got := rt.last.RunSpec.Env
+	want := []string{"DIFFICULTY=hard", "EULA=TRUE"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("RunSpec.Env = %v, want %v", got, want)
+	}
+
+	// A direct server carries no image override and no run spec.
+	direct := &model.GameServer{ID: "srv-d", HostID: ptr("host-d"), Version: "1.20.4", CPUs: 1, MemoryMB: 1024}
+	if _, err := p.Provision(ctx, direct); err != nil {
+		t.Fatalf("provision direct: %v", err)
+	}
+	if rt.last.ImageRef != "" || rt.last.RunSpec != nil {
+		t.Errorf("direct VMSpec carried template data: imageRef=%q runspec=%v", rt.last.ImageRef, rt.last.RunSpec)
+	}
+}
+
 func assertRemoteState(t *testing.T, p *RemoteProvisioner, s *model.GameServer, want State) {
 	t.Helper()
 	got, err := p.Status(context.Background(), s)

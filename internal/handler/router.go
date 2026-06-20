@@ -30,11 +30,14 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 	gameServerRepo := repository.NewGameServerRepository(pool)
 	authHandler := NewAuthHandler(userRepo, refreshRepo, jwtManager, cfg.RefreshTTL)
 	adminHandler := NewAdminHandler(userRepo, gameServerRepo, hostRepo)
+	// One registry client backs both the template browse endpoints and the
+	// server-side template resolution the create handler performs.
+	registryClient := registry.New(cfg.TemplateIndexURL, &http.Client{Timeout: 10 * time.Second})
 	// The scheduler is stateless over the shared in-memory host inventory, so the
 	// handler builds its own; the reconciler builds another over the same store.
-	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo))
+	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo), registryClient)
 	agentHandler := NewAgentHandler(hostRepo, gameServerRepo)
-	templateHandler := NewTemplateHandler(registry.New(cfg.TemplateIndexURL, &http.Client{Timeout: 10 * time.Second}))
+	templateHandler := NewTemplateHandler(registryClient)
 
 	r := gin.New()
 	r.Use(gin.Recovery())

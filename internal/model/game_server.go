@@ -43,6 +43,16 @@ type GameServer struct {
 	DesiredState string `json:"desired_state"`
 	Status       string `json:"status"`
 
+	// Marketplace provenance (set only for servers launched from a template).
+	// TemplateID records which template the server came from; ImageRef is the
+	// authoritative OCI image the VM boots (overriding the agent's FC_IMAGE_REF
+	// default); Env is the resolved environment (operator answers substituted
+	// into the template manifest) the agent merges over the image's baked-in env.
+	// All nil for servers created the direct way (name + version).
+	TemplateID *string           `json:"template_id,omitempty"`
+	ImageRef   *string           `json:"image_ref,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+
 	// HostID is the fleet host the scheduler placed this server on (P2). It is
 	// set before provisioning and persists across stop/start (the VM stays put);
 	// it is cleared only on delete. Nil until placed.

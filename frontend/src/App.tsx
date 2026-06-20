@@ -51,7 +51,7 @@ export function App() {
       {route === "servers" ? (
         <ServersView role={role} onCountChange={setServerCount} />
       ) : route === "marketplace" ? (
-        <MarketplaceView />
+        <MarketplaceView onLaunched={() => setRoute("servers")} />
       ) : (
         <StubView route={route} />
       )}

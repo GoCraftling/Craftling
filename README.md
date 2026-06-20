@@ -193,6 +193,14 @@ curl -s -X POST localhost:8080/api/v1/servers \
   -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
   -d '{"name":"survival","version":"1.20.4"}'
 
+# Or launch from a marketplace template: the control plane fetches the manifest
+# from the trusted registry, validates the answers, and resolves the OCI image
+# and environment server-side (the client never supplies the image or raw env).
+curl -s -X POST localhost:8080/api/v1/servers \
+  -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+  -d '{"name":"survival","template_id":"vanilla-1","eula_accepted":true,
+       "answers":{"DIFFICULTY":"hard"},"cpus":4,"memory_mb":8192}'
+
 # Poll until the reconciler reports status "running" with host/port
 curl -s localhost:8080/api/v1/servers/<id> -H "Authorization: Bearer $ACCESS"
 

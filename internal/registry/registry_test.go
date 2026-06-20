@@ -87,6 +87,75 @@ func TestCaching(t *testing.T) {
 	}
 }
 
+func TestManifestParsed(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	m, err := c.ManifestParsed(context.Background(), "vanilla-1")
+	if err != nil {
+		t.Fatalf("ManifestParsed: %v", err)
+	}
+	if m.ImageName != "itzg/minecraft-server" || m.ImageTag != "java21" || !m.EULANeeded {
+		t.Fatalf("unexpected manifest: %+v", m)
+	}
+}
+
+func TestResolve(t *testing.T) {
+	m := &Manifest{
+		ImageName: "itzg/minecraft-server",
+		ImageTag:  "java21",
+		Variables: []Variable{
+			{Name: "DIFFICULTY", AcceptableAnswers: []string{"peaceful", "easy", "hard"}},
+			{Name: "MOTD"}, // free text
+		},
+		Env: map[string]string{
+			"EULA":       "TRUE",
+			"DIFFICULTY": "$DIFFICULTY$",
+			"MOTD":       "Welcome to $MOTD$",
+			"UNTOUCHED":  "$NOTAVAR$",
+		},
+	}
+
+	env, ref, err := Resolve(m, map[string]string{"DIFFICULTY": "hard", "MOTD": "my server"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if ref != "itzg/minecraft-server:java21" {
+		t.Fatalf("image ref = %q", ref)
+	}
+	want := map[string]string{
+		"EULA":       "TRUE",
+		"DIFFICULTY": "hard",
+		"MOTD":       "Welcome to my server",
+		"UNTOUCHED":  "$NOTAVAR$", // unknown placeholder left untouched
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("env[%q] = %q, want %q", k, env[k], v)
+		}
+	}
+
+	// A select variable out of range is rejected.
+	if _, _, err := Resolve(m, map[string]string{"DIFFICULTY": "nightmare"}); !errors.Is(err, ErrInvalidAnswer) {
+		t.Errorf("out-of-range answer err = %v, want ErrInvalidAnswer", err)
+	}
+	// A missing select variable is rejected.
+	if _, _, err := Resolve(m, map[string]string{}); !errors.Is(err, ErrInvalidAnswer) {
+		t.Errorf("missing answer err = %v, want ErrInvalidAnswer", err)
+	}
+}
+
+func TestSortedEnv(t *testing.T) {
+	got := SortedEnv(map[string]string{"B": "2", "A": "1", "C": "3"})
+	want := []string{"A=1", "B=2", "C=3"}
+	if len(got) != len(want) {
+		t.Fatalf("SortedEnv = %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("SortedEnv = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestUpstreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
