@@ -58,6 +58,27 @@ export interface ApiServer {
   updated_at: string
 }
 
+// ── Host fleet (admin) ──────────────────────────────────────────────────────
+
+export type ApiHostStatus = "ready" | "draining" | "down"
+
+export interface ApiHost {
+  id: string
+  hostname: string
+  address: string
+  zone: string
+  // *_total is physical capacity; *_allocatable is what's left for new placements.
+  cpus_total: number
+  memory_mb_total: number
+  cpus_allocatable: number
+  memory_mb_allocatable: number
+  status: ApiHostStatus
+  agent_version: string
+  last_heartbeat_at: string
+  created_at: string
+  updated_at: string
+}
+
 export interface CreateServerInput {
   name: string
   cpus?: number
@@ -258,6 +279,11 @@ export const api = {
   // Admin-only: every server across all owners.
   adminListServers(): Promise<ApiServer[]> {
     return request<{ servers: ApiServer[] | null }>("/admin/servers").then((r) => r.servers ?? [])
+  },
+
+  // Admin-only: the whole worker-host fleet inventory.
+  adminListHosts(): Promise<ApiHost[]> {
+    return request<{ hosts: ApiHost[] | null }>("/admin/hosts").then((r) => r.hosts ?? [])
   },
 
   // Admin-only: every user.
