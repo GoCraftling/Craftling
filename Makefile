@@ -1,11 +1,10 @@
-.PHONY: run run-agent build build-agent test test-e2e test-kvm test-bpf tidy fmt bpf-generate proto-generate
+.PHONY: run run-agent build build-agent test test-e2e test-kvm test-bpf tidy fmt bpf-generate
 
 run:
 	go run ./cmd/server
 
-# Run a host agent (P3). The agent dials the control plane's gRPC AgentLink and
-# holds a stream open; override the target via env, e.g.
-# MODE=agent CONTROL_PLANE_GRPC_ADDR=localhost:8090 AGENT_RUNTIME=fake.
+# Run a host agent (P3). Defaults target a local control plane; override via env,
+# e.g. MODE=agent CONTROL_PLANE_URL=... ADVERTISE_ADDR=... PORT=9000.
 run-agent:
 	MODE=agent go run ./cmd/agent
 
@@ -49,19 +48,6 @@ bpf-generate:
 	@test -r /sys/kernel/btf/vmlinux || { echo "need kernel BTF (CONFIG_DEBUG_INFO_BTF=y)"; exit 1; }
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $(BPF_DIR)/vmlinux.h
 	go generate ./$(BPF_DIR)/...
-
-# Regenerate the gRPC AgentLink stubs from proto/agentlink/agentlink.proto. This
-# is a MAINTAINER step; the outputs (internal/agentlink/pb/*.pb.go) are committed
-# so `go build`/CI need only the Go toolchain. Run after editing the .proto, then
-# `git add` the regenerated files. Requires protoc plus the Go plugins:
-#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-#   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-proto-generate:
-	@command -v protoc >/dev/null || { echo "need protoc (protobuf-compiler)"; exit 1; }
-	protoc \
-		--go_out=. --go_opt=module=github.com/aarani/craftling-go \
-		--go-grpc_out=. --go-grpc_opt=module=github.com/aarani/craftling-go \
-		proto/agentlink/agentlink.proto
 
 tidy:
 	go mod tidy

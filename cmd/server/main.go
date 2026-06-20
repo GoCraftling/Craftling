@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"log"
-	"net"
 	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/aarani/craftling-go/internal/agentlink"
-	pb "github.com/aarani/craftling-go/internal/agentlink/pb"
+	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/config"
 	"github.com/aarani/craftling-go/internal/db"
 	"github.com/aarani/craftling-go/internal/handler"
@@ -24,7 +22,6 @@ import (
 	"github.com/aarani/craftling-go/internal/seed"
 	"github.com/aarani/craftling-go/internal/worldstore"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -37,6 +34,8 @@ const (
 	// hostHeartbeatTTL is how long a host may go without heartbeating before it
 	// is marked down.
 	hostHeartbeatTTL = 30 * time.Second
+	// agentCallTimeout bounds each control-plane→agent VM API call.
+	agentCallTimeout = 10 * time.Second
 	// worldGCInterval is how often the durable world store is swept for
 	// snapshots belonging to no live server (P5b).
 	worldGCInterval = time.Hour
@@ -74,10 +73,8 @@ func main() {
 	dbCancel()
 
 	// The fleet inventory lives in process memory (P1). It is shared between the
-	// agent link hub (which registers/heartbeats hosts as their streams come and
-	// go) and the host reaper.
+	// HTTP handlers (register/heartbeat) and the host reaper.
 	hostRepo := repository.NewHostRepository()
-	gameServerRepo := repository.NewGameServerRepository(pool)
 
 	router := handler.NewRouter(cfg, zlog, pool, hostRepo)
 
@@ -87,18 +84,6 @@ func main() {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
-	}
-
-	// The hub is the control plane's end of the persistent agent connection:
-	// agents dial the gRPC listener and hold a stream open, and the hub pushes VM
-	// commands down it. It registers hosts (reconstructing committed capacity
-	// from the durable server records) and tracks liveness off the stream.
-	hub := agentlink.NewHub(hostRepo, gameServerRepo, zlog)
-	grpcSrv := grpc.NewServer()
-	pb.RegisterAgentLinkServer(grpcSrv, hub)
-	grpcLis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
-	if err != nil {
-		zlog.Fatal("listen for agent gRPC", zap.Error(err))
 	}
 
 	// ctx is cancelled on the first interrupt/terminate signal, which both
@@ -118,8 +103,8 @@ func main() {
 	// then drives the VM by calling the assigned host's agent (the control plane
 	// never touches KVM itself).
 	sched := scheduler.New(hostRepo)
-	prov := provisioner.NewRemote(hub)
-	rec := reconciler.New(gameServerRepo, prov, sched, zlog)
+	prov := provisioner.NewRemote(hostRepo, agent.NewClient(&http.Client{Timeout: agentCallTimeout}))
+	rec := reconciler.New(repository.NewGameServerRepository(pool), prov, sched, zlog)
 	go rec.Run(ctx, reconcileInterval)
 
 	// If a durable world store is configured, periodically GC snapshots that no
@@ -131,16 +116,8 @@ func main() {
 	if err != nil {
 		zlog.Warn("world store unavailable; world GC disabled", zap.Error(err))
 	} else if worldStore != nil {
-		go reaper.Worlds(ctx, zlog, worldStore, gameServerRepo, worldGCInterval)
+		go reaper.Worlds(ctx, zlog, worldStore, repository.NewGameServerRepository(pool), worldGCInterval)
 	}
-
-	// Serve the agent gRPC link alongside the HTTP API.
-	go func() {
-		zlog.Info("agent gRPC listening", zap.String("port", cfg.GRPCPort))
-		if err := grpcSrv.Serve(grpcLis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			zlog.Fatal("agent gRPC serve failed", zap.Error(err))
-		}
-	}()
 
 	// Start the server in a goroutine so it doesn't block graceful shutdown handling.
 	go func() {
@@ -153,8 +130,6 @@ func main() {
 	<-ctx.Done()
 	stop() // restore default signal handling so a second signal force-quits
 	zlog.Info("shutting down server...")
-
-	grpcSrv.GracefulStop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
