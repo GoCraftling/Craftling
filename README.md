@@ -41,6 +41,7 @@ a fresh database and one already at an older revision.
 | Variable       | Default                                                          | Description                      |
 | -------------- | --------------------------------------------------------------- | -------------------------------- |
 | `PORT`         | `8080`                                                          | HTTP listen port                 |
+| `GRPC_PORT`    | `8090`                                                          | gRPC AgentLink listen port — agents dial it and hold a command stream open |
 | `APP_ENV`      | `development`                                                   | `production` → release mode + JSON logs |
 | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/craftling?sslmode=disable` | Postgres connection string |
 | `JWT_SECRET`   | `dev-secret-change-me`                                          | HMAC signing secret (**set in prod**) |
@@ -54,8 +55,7 @@ a fresh database and one already at an older revision.
 
 | Variable          | Default            | Description                                            |
 | ----------------- | ------------------ | ------------------------------------------------------ |
-| `CONTROL_PLANE_URL` | `http://localhost:8080` | Control plane the agent registers + heartbeats with |
-| `ADVERTISE_ADDR`  | `localhost:9000`   | Agent API address the control plane calls back         |
+| `CONTROL_PLANE_GRPC_ADDR` | `localhost:8090` | Control plane's gRPC AgentLink the agent dials and holds a stream open to |
 | `ADVERTISE_HOST`  | `127.0.0.1`        | Player-facing connect host VMs report                  |
 | `AGENT_RUNTIME`   | `fake`             | VM backend: `fake` (in-memory) or `firecracker` (real microVMs) |
 | `FC_BINARY`       | `firecracker`      | Firecracker executable (PATH lookup by default)        |
@@ -107,8 +107,12 @@ with `nf_conntrack`/`nf_nat` available; it needs no extra env to run.
 | GET    | `/api/v1/admin/users`    | Admin  | List all users (role `admin` only)  |
 | GET    | `/api/v1/admin/servers`  | Admin  | List all servers across all owners  |
 | GET    | `/api/v1/admin/hosts`    | Admin  | List the fleet                      |
-| POST   | `/api/v1/agent/hosts/register`      | Agent | Host registers itself        |
-| POST   | `/api/v1/agent/hosts/:id/heartbeat` | Agent | Host liveness + capacity heartbeat |
+
+Agents do **not** use the HTTP API. Each host agent dials the control plane's
+gRPC **AgentLink** service (`GRPC_PORT`, default `:8090`) and holds one
+bidirectional stream open: it registers and heartbeats on that stream, the
+control plane pushes VM lifecycle commands down it, and the agent answers on the
+same stream. The agent exposes no inbound API of its own.
 
 Auth endpoints return a token pair:
 
@@ -179,13 +183,16 @@ marked `unschedulable` and retried; a spec larger than any host is rejected at
 create time.
 
 **Agent split (P3).** The control plane never touches KVM. The reconciler's
-backend is `provisioner.RemoteProvisioner`, which resolves the assigned host's
-address and calls that host's **agent** (`cmd/agent` / `internal/agent`) over
-HTTP to provision/start/stop/deprovision the VM. The agent runs a `Runtime`;
-which one is chosen by `AGENT_RUNTIME` (`fake` for the in-memory stub, or
-`firecracker` for real microVMs) — the API and reconciler are identical either
-way because both satisfy the same `agent.Runtime` interface. Agents register and
-heartbeat with the control plane so the scheduler knows the fleet.
+backend is `provisioner.RemoteProvisioner`, which routes each call to the
+assigned host's **agent** (`cmd/agent` / `internal/agent`) by pushing a command
+down the persistent gRPC stream that agent holds open to the control plane
+(`internal/agentlink`) — the control plane never dials the agent, so agents need
+no inbound reachability. The agent runs a `Runtime`; which one is chosen by
+`AGENT_RUNTIME` (`fake` for the in-memory stub, or `firecracker` for real
+microVMs) — the API and reconciler are identical either way because both satisfy
+the same `agent.Runtime` interface. Agents register and heartbeat over that same
+stream, and dropping the stream marks the host down at once, so the scheduler
+always knows the fleet.
 
 ```bash
 # Create a server (desired_state defaults to running)
@@ -262,21 +269,22 @@ agent host. Design and status: [docs/ebpf-nat-dataplane.md](docs/ebpf-nat-datapl
 ## Layout
 
 ```
-cmd/server          control-plane entry point: DB connect/migrate + HTTP API + graceful shutdown
-cmd/agent           host-agent entry point: VM API + register/heartbeat; selects the VM backend
+cmd/server          control-plane entry point: DB connect/migrate + HTTP API + gRPC AgentLink + graceful shutdown
+cmd/agent           host-agent entry point: dials the control plane, serves pushed VM commands over a persistent gRPC stream; selects the VM backend
 cmd/init            in-VM PID 1: mount, fetch run spec from MMDS, apply networking, supervise workload
 internal/config     environment configuration (control plane + agent + Firecracker)
 internal/db         pgx pool + embedded goose migrations
 internal/model      domain types (User, GameServer, Host)
 internal/repository data access (Postgres; in-memory host inventory)
 internal/auth       bcrypt password hashing + JWT issue/verify
-internal/handler    control-plane routes (auth, servers, templates, admin, agent)
-internal/middleware request ID, request logging, JWT/agent auth guards
+internal/handler    control-plane routes (auth, servers, templates, admin)
+internal/middleware request ID, request logging, JWT auth guard
 internal/registry   template registry (marketplace) client
 internal/scheduler  host placement + atomic capacity reservation (P2)
 internal/reconciler desired-state → observed-status convergence loop
 internal/provisioner Provisioner seam: Fake + RemoteProvisioner (P3)
-internal/agent      host agent: Runtime interface, FakeRuntime, VM API server + clients (P3)
+internal/agent      host agent: Runtime interface, FakeRuntime, agent-side gRPC link loop (P3)
+internal/agentlink  control-plane side of the agent gRPC stream: hub (connection registry + command push) + generated protobuf
 internal/agent/firecracker  real Firecracker microVM Runtime + eBPF NAT dataplane (P4/P6)
 internal/firecracker generated Firecracker REST client (go-openapi, over the API Unix socket)
 internal/image      OCI/Docker image → squashfs rootfs converter (injects cmd/init)

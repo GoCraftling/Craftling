@@ -18,8 +18,11 @@ binary:
   compute side effects), and background reapers.
 - **Host agent** (`cmd/agent`, `Mode=agent`): owns KVM. Boots each game server as
   a real Firecracker microVM, runs the eBPF NAT dataplane, and manages world
-  disks/snapshots. Registers + heartbeats up to the control plane and is driven
-  *down* via its REST API.
+  disks/snapshots. It dials the control plane and holds one **agent-initiated
+  gRPC stream** (`AgentLink`) open: it registers + heartbeats on that stream and
+  the control plane pushes VM commands *down* it. The agent exposes no inbound
+  API — so agents need no reachability — and the open stream is itself the host's
+  liveness signal.
 
 A third binary, **`cmd/init`**, is the in-guest PID 1 baked into every rootfs.
 
@@ -51,8 +54,10 @@ A third binary, **`cmd/init`**, is the in-guest PID 1 baked into every rootfs.
 - **API surface** (`internal/handler/router.go`): auth
   (register/login/refresh/logout/me), owner-scoped servers (CRUD +
   `POST /servers/:id/snapshot`), templates (list/get), admin
-  (users/servers/hosts), agent (`hosts/register`, `hosts/:id/heartbeat`),
-  `healthz`/`ping`.
+  (users/servers/hosts), `healthz`/`ping`. Agents are **not** on the HTTP API:
+  they connect over the gRPC `AgentLink` stream (`internal/agentlink`, separate
+  `GRPC_PORT` listener), which carries registration, heartbeats, and command
+  push.
 - **Reapers** (`internal/reaper`): refresh-token GC (hourly), host stale→`down`
   (10s sweep / 30s TTL), world-store GC (hourly, store-configured only).
 
@@ -62,11 +67,12 @@ A third binary, **`cmd/init`**, is the in-guest PID 1 baked into every rootfs.
 pre-existing DBs); `Provisioner` extended with `Start`/`Stop`/`Status`/`Snapshot`
 (stopped ≠ destroyed); `Mode` (`server`/`agent`) in `internal/config`.
 
-**P1 — Host fleet.** `model.Host` + in-memory `HostRepository`; agent endpoints
-`POST /agent/hosts/register` + `/agent/hosts/:id/heartbeat` behind a placeholder
-`middleware.AgentAuth` seam; admin `GET /admin/hosts`; host reaper (stale→`down`,
-heartbeat recovers to `ready`). Identity is **agent-owned** so ids survive a
-control-plane restart without a durable table.
+**P1 — Host fleet.** `model.Host` + in-memory `HostRepository`; agents register +
+heartbeat over the gRPC `AgentLink` stream (originally HTTP `POST
+/agent/hosts/register` + `/heartbeat`, later folded into the stream); admin `GET
+/admin/hosts`; host reaper (stale→`down`, heartbeat recovers to `ready`) plus
+immediate `MarkDown` when a stream drops. Identity is **agent-owned** so ids
+survive a control-plane restart without a durable table.
 
 **P2 — Scheduler / placement.** `internal/scheduler` — least-loaded first-fit over
 the in-memory fleet with **atomic capacity reservation** (`Reserve`/`Release`
@@ -77,10 +83,12 @@ releases capacity on delete. Create-time `CanEverFit` rejects specs no host coul
 ever hold.
 
 **P3 — Agent split.** `cmd/agent` + `internal/agent` (`Runtime` interface,
-`FakeRuntime`, HTTP `Server`/`NewRouter`, `Client`, `CPClient`).
-`provisioner.RemoteProvisioner` resolves the assigned host from the in-memory
-inventory and calls its agent — the reconciler's call *shape* is unchanged, it
-just became a network hop. Per-VM observed status flows back via `Status`.
+`FakeRuntime`, agent-side gRPC link loop) + `internal/agentlink` (control-plane
+hub: connection registry + command push, over generated protobuf).
+`provisioner.RemoteProvisioner` routes each call to the assigned host by pushing
+a command down that host's open stream via the hub — the reconciler's call
+*shape* is unchanged, it just became a message on the stream (the control plane
+never dials the agent). Per-VM observed status flows back via `Status`.
 
 **P4 — Firecracker runtime + image pipeline.** *(Plan previously marked the image
 build "deferred" — it is built.)*
@@ -205,12 +213,10 @@ it is feature-complete for IPv4 TCP/UDP.)*
 ## Remaining work
 
 ### Housekeeping / tech debt (do before/alongside P7+)
-- **`fc-assets/` is uncommitted and root-owned**, and `fc-assets/work` is
-  permission-denied, which breaks `go build ./...` / `go test ./...` from a fresh
-  checkout (the `./...` glob fails to walk it). Add `fc-assets/` to `.gitignore`
-  (it's runtime/working data), fix ownership, and keep it out of the module tree.
-  `docker-compose.yml` (modified) and `Dockerfile.agent` (untracked) also have
-  uncommitted changes — land them.
+- ✅ **`fc-assets/` is now git-ignored** (`/fc-assets/`, runtime/working data) and
+  ownership fixed, so `go build ./...` / `go test ./...` walk cleanly from a fresh
+  checkout. `Dockerfile.agent` (untracked) may still have uncommitted changes —
+  land it.
 - **Provisioning capacity race:** the scheduler reserves, but if real host
   capacity has shrunk by the time the agent provisions, there is no rollback — the
   server retries next tick. Acceptable for now; revisit with P8 fencing.
@@ -248,9 +254,9 @@ it is feature-complete for IPv4 TCP/UDP.)*
 - **Verify:** e2e — exceed quota → `403`.
 
 ### P10 — Hardening & ops  ⏳ largely not started
-- **Agent↔control-plane auth:** `middleware.AgentAuth` is still a **no-op
-  pass-through** — `/api/v1/agent/*` is unauthenticated. Add per-host tokens or
-  mTLS with rotation and lock it down.
+- **Agent↔control-plane auth:** the gRPC `AgentLink` stream is **unauthenticated**
+  (insecure transport, no per-host credential check on connect). Add per-host
+  tokens (a metadata/stream interceptor) or mTLS with rotation and lock it down.
 - **Secrets / fail-fast:** `JWT_SECRET` defaults to `dev-secret-change-me` with no
   startup check — **fail fast** if it (or other prod secrets) is the default in a
   production mode. Source DB/object-storage/JWT creds from env/secret store.
@@ -269,8 +275,7 @@ it is feature-complete for IPv4 TCP/UDP.)*
 `P0 → P1 → P2 → P3 → P4 → P6` are **done** (compute + player-access path). `P5`
 (done) sits on P3 and gates safe reschedule in P8. Remaining:
 `P7` and `P9` depend on P3 (any time); `P8` depends on P2 + P5; `P10` is last and
-cross-cutting. Housekeeping is independent — do it first since it currently blocks
-a clean `go build ./...`.
+cross-cutting. Housekeeping is independent.
 
 ## Components at a glance
 
@@ -279,7 +284,7 @@ a clean `go build ./...`.
 | P0 | ✅ | — | `internal/db/migrations` (goose) | (migrations) |
 | P1 | ✅ | — | `repository/host.go` (in-mem), host reaper | — (no `hosts` table, by design) |
 | P2 | ✅ | — | `internal/scheduler` | `game_servers.host_id` (`00002`) |
-| P3 | ✅ | `cmd/agent` | `internal/agent`, `provisioner.RemoteProvisioner` | — |
+| P3 | ✅ | `cmd/agent` | `internal/agent` (agent-side link), `internal/agentlink` (CP hub + gRPC), `provisioner.RemoteProvisioner` | — |
 | P4 | ✅ | `cmd/init` | `internal/agent/firecracker`, `internal/image`, `internal/squashfs`, `internal/runspec`, `internal/registry` | — |
 | P5 | ✅ | — | world disk + overlay; `internal/storage` (`DirStore` + `s3`); `internal/worldstore`; vsock quiesce; `reaper.Worlds` | world disk (host file) + snapshot (store blob); `game_servers.backup_requested/last_backup_at` (`00003`) |
 | P6 | ✅ | — | `firecracker/{nat,tap,tapfilter,netalloc}*`, `bpf/`, `cmd/init/net*` | host/port written back (existing cols) |
