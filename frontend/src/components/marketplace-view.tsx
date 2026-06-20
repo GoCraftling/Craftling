@@ -1,18 +1,19 @@
 /* marketplace-view.tsx — registry gallery. Lists templates from the control
- * plane, and on selection opens the dynamic config form. Stops at resolving the
- * env (the seam for the future init/rootfs + create-server step). */
+ * plane; on selection opens the dynamic config form, and on launch creates a real
+ * server (the control plane resolves the image + env from the template) before
+ * handing off to the Servers view to watch it provision. */
 import { useCallback, useEffect, useState } from "react"
 import { Icon } from "./icon"
 import { Btn } from "./primitives"
 import { TemplateDrawer, type TemplateLaunch } from "./template-drawer"
 import { api, ApiError, type TemplateSummary } from "@/lib/api"
 
-export function MarketplaceView() {
+export function MarketplaceView({ onLaunched }: { onLaunched?: () => void }) {
   const [templates, setTemplates] = useState<TemplateSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<TemplateSummary | null>(null)
-  const [launched, setLaunched] = useState<TemplateLaunch | null>(null)
+  const [launching, setLaunching] = useState(false)
 
   // All state updates happen in promise callbacks so this is safe to call from
   // an effect (no synchronous setState in the effect body).
@@ -33,12 +34,33 @@ export function MarketplaceView() {
     load()
   }, [load])
 
-  // Stops here per scope: surface the resolved env; provisioning comes later.
-  const onComplete = useCallback((launch: TemplateLaunch) => {
-    console.log("[marketplace] resolved launch", launch)
-    setSelected(null)
-    setLaunched(launch)
-  }, [])
+  // Create the server from the template, then hand off to the Servers view. The
+  // control plane resolves the image + env from the template id and answers, so
+  // we send those rather than the locally resolved env.
+  const onComplete = useCallback(
+    (launch: TemplateLaunch) => {
+      setLaunching(true)
+      setError(null)
+      api
+        .createServer({
+          name: launch.name,
+          template_id: launch.templateId,
+          answers: launch.answers,
+          eula_accepted: launch.eulaAccepted,
+          cpus: launch.cpus,
+          memory_mb: launch.mem,
+        })
+        .then(() => {
+          setSelected(null)
+          onLaunched?.()
+        })
+        .catch((e) =>
+          setError(e instanceof ApiError ? e.message : "Couldn't launch this template.")
+        )
+        .finally(() => setLaunching(false))
+    },
+    [onLaunched]
+  )
 
   return (
     <div className="page-inner">
@@ -70,32 +92,6 @@ export function MarketplaceView() {
           <span>{error}</span>
           <button className="icon-btn sm" onClick={load} style={{ marginLeft: "auto" }}>
             <Icon name="restart" size={14} />
-          </button>
-        </div>
-      )}
-
-      {launched && (
-        <div
-          className="row gap-2 t-sm"
-          style={{
-            color: "var(--success-fg)",
-            background: "color-mix(in oklab, var(--success) 12%, transparent)",
-            padding: "10px 12px",
-            borderRadius: "var(--radius)",
-            alignItems: "center",
-          }}
-        >
-          <Icon name="check" size={15} style={{ flex: "none" }} />
-          <span>
-            <b>{launched.name}</b> configured from <b>{launched.manifest.template_name}</b> —{" "}
-            {Object.keys(launched.env).length} env vars resolved. Provisioning hand-off is next.
-          </span>
-          <button
-            className="icon-btn sm"
-            onClick={() => setLaunched(null)}
-            style={{ marginLeft: "auto" }}
-          >
-            <Icon name="x" size={14} />
           </button>
         </div>
       )}
@@ -173,6 +169,7 @@ export function MarketplaceView() {
       {selected && (
         <TemplateDrawer
           summary={selected}
+          launching={launching}
           onClose={() => setSelected(null)}
           onComplete={onComplete}
         />

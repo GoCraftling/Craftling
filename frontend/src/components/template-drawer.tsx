@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { Icon } from "./icon"
 import { Btn } from "./primitives"
+import { SIZES, MAX_HOST_CPU, MAX_HOST_MEM } from "./servers-shared"
 import {
   api,
   resolveEnv,
@@ -14,17 +15,23 @@ import {
 
 export interface TemplateLaunch {
   name: string
+  templateId: string
   manifest: TemplateManifest
   answers: Record<string, string>
   env: Record<string, string>
+  eulaAccepted: boolean
+  cpus: number
+  mem: number
 }
 
 export function TemplateDrawer({
   summary,
+  launching = false,
   onClose,
   onComplete,
 }: {
   summary: TemplateSummary
+  launching?: boolean
   onClose: () => void
   onComplete: (launch: TemplateLaunch) => void
 }) {
@@ -34,6 +41,8 @@ export function TemplateDrawer({
   const [name, setName] = useState("")
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [eula, setEula] = useState(false)
+  const [size, setSize] = useState("medium")
+  const sz = SIZES.find((x) => x.id === size)!
 
   // Fetch the manifest and seed each variable with its first acceptable answer.
   useEffect(() => {
@@ -64,15 +73,20 @@ export function TemplateDrawer({
 
   const nameValid = name.trim().length >= 3
   const eulaOk = !manifest?.eula_needed || eula
-  const valid = !!manifest && nameValid && eulaOk
+  const oversize = sz.cpus > MAX_HOST_CPU || sz.mem > MAX_HOST_MEM
+  const valid = !!manifest && nameValid && eulaOk && !oversize
 
   const submit = () => {
     if (!valid || !manifest) return
     onComplete({
       name: name.trim().toLowerCase().replace(/\s+/g, "-"),
+      templateId: summary.template_id,
       manifest,
       answers,
       env: resolved,
+      eulaAccepted: eula,
+      cpus: sz.cpus,
+      mem: sz.mem,
     })
   }
 
@@ -143,6 +157,38 @@ export function TemplateDrawer({
                   autoFocus
                 />
                 <span className="t-xs muted">Lowercase, hyphenated. Min 3 characters.</span>
+              </div>
+
+              <div className="field">
+                <label className="label">Size</label>
+                <div className="input-wrap">
+                  <select
+                    className="select"
+                    value={size}
+                    onChange={(e) => setSize(e.target.value)}
+                  >
+                    {SIZES.map((x) => (
+                      <option key={x.id} value={x.id}>
+                        {x.label} — {x.cpus} vCPU · {Math.round(x.mem / 1024)} GB ({x.hint})
+                      </option>
+                    ))}
+                  </select>
+                  <Icon
+                    name="chevDown"
+                    size={14}
+                    style={{
+                      position: "absolute",
+                      right: 10,
+                      left: "auto",
+                      color: "var(--muted-foreground)",
+                    }}
+                  />
+                </div>
+                {(sz.cpus > MAX_HOST_CPU || sz.mem > MAX_HOST_MEM) && (
+                  <span className="t-xs" style={{ color: "var(--danger-fg)" }}>
+                    Exceeds the capacity of any host in the fleet.
+                  </span>
+                )}
               </div>
 
               {manifest.variables.map((v) => (
@@ -264,11 +310,19 @@ export function TemplateDrawer({
         </div>
 
         <div className="drawer-foot">
-          <Btn variant="ghost" onClick={onClose}>
+          <Btn variant="ghost" onClick={onClose} disabled={launching}>
             Cancel
           </Btn>
-          <Btn variant="primary" onClick={submit} disabled={!valid}>
-            <Icon name="bolt" size={15} /> Configure & launch
+          <Btn variant="primary" onClick={submit} disabled={!valid || launching}>
+            {launching ? (
+              <>
+                <Icon name="restart" className="spin" size={15} /> Launching…
+              </>
+            ) : (
+              <>
+                <Icon name="bolt" size={15} /> Configure & launch
+              </>
+            )}
           </Btn>
         </div>
       </div>

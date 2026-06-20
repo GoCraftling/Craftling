@@ -7,6 +7,8 @@ import (
 
 	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/model"
+	"github.com/aarani/craftling-go/internal/registry"
+	"github.com/aarani/craftling-go/internal/runspec"
 )
 
 // ErrUnplaced means a server reached the provisioner without a host assignment.
@@ -40,13 +42,24 @@ func (p *RemoteProvisioner) Provision(ctx context.Context, s *model.GameServer) 
 	if err != nil {
 		return nil, err
 	}
-	vm, err := p.client.Provision(ctx, base, agent.VMSpec{
+	spec := agent.VMSpec{
 		ServerID: s.ID,
 		Game:     s.Game,
 		Version:  s.Version,
 		CPUs:     s.CPUs,
 		MemoryMB: s.MemoryMB,
-	})
+	}
+	// A template-launched server carries an authoritative image and a resolved
+	// environment; pass both so the agent boots the chosen image and the guest
+	// init merges the env over the image's baked-in defaults. A direct server
+	// leaves these empty and the agent uses its configured default image.
+	if s.ImageRef != nil {
+		spec.ImageRef = *s.ImageRef
+	}
+	if len(s.Env) > 0 {
+		spec.RunSpec = &runspec.RunSpec{Env: registry.SortedEnv(s.Env)}
+	}
+	vm, err := p.client.Provision(ctx, base, spec)
 	if err != nil {
 		return nil, err
 	}
