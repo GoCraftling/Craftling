@@ -14,6 +14,7 @@
 package firecracker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -24,12 +25,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aarani/craftling-go/internal/image"
 	"github.com/aarani/craftling-go/internal/runspec"
 	"github.com/aarani/craftling-go/internal/storage"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"go.uber.org/zap"
 )
+
+// ImageEnsurer resolves an OCI ref (pinned to a platform) to a
+// content-addressed read-only squashfs rootfs path and the RunSpec distilled
+// from the image's OCI config, building the rootfs on first use and reusing the
+// cached artifact thereafter. *image.Store is the production implementation; the
+// seam exists so the non-KVM tests can substitute a fake and assert what context
+// the (long, idempotent) build runs under.
+type ImageEnsurer interface {
+	Ensure(ctx context.Context, ref string, platform *v1.Platform) (string, runspec.RunSpec, error)
+}
 
 // Config configures the Firecracker Runtime. Paths point at host artifacts
 // (kernel, the squashfs image cache) provided out of band on the agent host.
@@ -42,7 +52,17 @@ type Config struct {
 	// rootfs files and resolves their RunSpec. Provision pulls the spec's image
 	// through it, attaches the resulting squashfs as a read-only /dev/vda, and
 	// publishes the RunSpec into MMDS for the in-VM init. Required.
-	ImageStore *image.Store
+	// *image.Store is the production implementation; the interface seam lets the
+	// non-KVM tests substitute a fake.
+	ImageStore ImageEnsurer
+	// ImagePullTimeout caps a single image build (pull + flatten + squashfs).
+	// The build is deliberately decoupled from the per-command context — it is
+	// content-addressed, idempotent, and shared across every VM booting the ref,
+	// so it must not be aborted because a control-plane command's context was
+	// cancelled (a stream reconnect, a caller deadline). Anchored to the
+	// runtime's lifetime instead, this is the only deadline bounding a stuck
+	// pull. Default DefaultImagePullTimeout.
+	ImagePullTimeout time.Duration
 	// ImageRef is the OCI image reference the driver converts for a server. A
 	// "{version}" placeholder is substituted with the spec's version, so one
 	// template (e.g. "myrepo/minecraft:{version}") covers every version. A ref
@@ -152,6 +172,12 @@ const (
 	DefaultRCONPort = 25575
 )
 
+// DefaultImagePullTimeout bounds a single image build (pull + flatten +
+// squashfs) when ImagePullTimeout is unset. Loose on purpose: a cold pull of a
+// large game-server image over a slow link can run into minutes, and the build
+// is shared, so over-tight is worse than over-loose.
+const DefaultImagePullTimeout = 10 * time.Minute
+
 // DefaultBootArgs is a minimal serial-console boot line that mounts the
 // read-only squashfs rootfs off the first virtio block device and hands PID 1
 // to the injected init agent. Writable state rides the world disk (/dev/vdb)
@@ -187,6 +213,9 @@ func (c *Config) validate() error {
 	}
 	if c.ImageStore == nil {
 		return errors.New("firecracker: ImageStore is required")
+	}
+	if c.ImagePullTimeout <= 0 {
+		c.ImagePullTimeout = DefaultImagePullTimeout
 	}
 	if c.ImageRef == "" && c.DefaultImageRef == "" {
 		return errors.New("firecracker: ImageRef or DefaultImageRef is required")

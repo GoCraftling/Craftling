@@ -43,11 +43,15 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 }
 
 // ReconcileOnce processes one batch of servers needing reconciliation.
+//
+// It runs under the reconciler's lifetime context, with no per-batch deadline:
+// a single step can legitimately take minutes (a cold image build pulls and
+// flattens a multi-hundred-MB image), and a short request-scoped timeout here
+// would abort that work and flip the server to an error status while the agent
+// is still making progress. Provisioning is bounded by the agent-side image
+// pull timeout and by process shutdown (ctx cancellation), not by this loop.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) {
-	opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	servers, err := r.servers.ListReconcilable(opCtx)
+	servers, err := r.servers.ListReconcilable(ctx)
 	if err != nil {
 		r.log.Error("list reconcilable servers", zap.Error(err))
 		return
@@ -55,9 +59,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 
 	for i := range servers {
 		s := &servers[i]
-		if err := r.reconcile(opCtx, s); err != nil {
+		if err := r.reconcile(ctx, s); err != nil {
 			r.log.Error("reconcile server", zap.String("id", s.ID), zap.Error(err))
-			_ = r.servers.MarkStatus(opCtx, s.ID, model.StatusError, err.Error())
+			_ = r.servers.MarkStatus(ctx, s.ID, model.StatusError, err.Error())
 		}
 	}
 }
