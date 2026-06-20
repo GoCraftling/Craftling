@@ -3,14 +3,16 @@
 package e2e
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"testing"
+
+	"github.com/aarani/craftling-go/internal/agent"
 )
 
 // TestAgentSeam verifies the control plane drives the VM on the host agent
-// across the network seam (P3): a created server's VM actually exists and runs
-// on the in-process agent, and deleting the server tears that VM down.
+// across the gRPC stream seam (P3): a created server's VM actually exists and
+// runs on the in-process agent, and deleting the server tears that VM down.
 func TestAgentSeam(t *testing.T) {
 	user := registerUser(t, "seam-user@example.com", "hunter2pass")
 	tok := user.AccessToken
@@ -25,11 +27,11 @@ func TestAgentSeam(t *testing.T) {
 
 	// The agent must report this VM as running, and tagged with the server id.
 	vm := agentVM(t, vmID)
-	if vm["state"] != "running" {
-		t.Errorf("agent vm state = %v, want running", vm["state"])
+	if vm.State != agent.StateRunning {
+		t.Errorf("agent vm state = %v, want running", vm.State)
 	}
-	if vm["server_id"] != id {
-		t.Errorf("agent vm server_id = %v, want %s", vm["server_id"], id)
+	if vm.ServerID != id {
+		t.Errorf("agent vm server_id = %v, want %s", vm.ServerID, id)
 	}
 
 	// Deleting the server deprovisions the VM on the agent.
@@ -39,25 +41,19 @@ func TestAgentSeam(t *testing.T) {
 	}
 	waitForGone(t, tok, id)
 
-	if vm := agentVM(t, vmID); vm["state"] != "missing" {
-		t.Errorf("after delete, agent vm state = %v, want missing", vm["state"])
+	if vm := agentVM(t, vmID); vm.State != agent.StateMissing {
+		t.Errorf("after delete, agent vm state = %v, want missing", vm.State)
 	}
 }
 
-// agentVM fetches a VM's record directly from the in-process agent API.
-func agentVM(t *testing.T, vmID string) map[string]any {
+// agentVM fetches a VM's record directly from the placement host's in-process
+// runtime — the same FakeRuntime the control plane drives over the stream — so
+// the test can confirm the command actually landed on the agent.
+func agentVM(t *testing.T, vmID string) *agent.VM {
 	t.Helper()
-	resp, err := http.Get(agentBaseURL + "/vms/" + vmID)
+	vm, err := fakeRT.Status(context.Background(), vmID)
 	if err != nil {
-		t.Fatalf("get agent vm: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("agent vm status = %d", resp.StatusCode)
-	}
-	var vm map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil {
-		t.Fatalf("decode agent vm: %v", err)
+		t.Fatalf("agent vm status: %v", err)
 	}
 	return vm
 }
