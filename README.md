@@ -4,8 +4,10 @@ The control plane **and** host agent for a multi-host, Firecracker-microVM
 Minecraft hosting platform. A [Gin](https://github.com/gin-gonic/gin) HTTP API
 owns users, auth, and game-server desired state; a reconciler drives each server
 onto a fleet host; and a per-host **agent** boots it as a real Firecracker
-microVM. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap (P0–P4 landed;
-P6 networking in progress).
+microVM. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap. **P0–P6 have
+landed** (foundations, host fleet, scheduler, agent split, Firecracker runtime,
+world persistence, and the eBPF NAT dataplane); P7–P10 — observability, reliability,
+quotas, and hardening — remain.
 
 ## Requirements
 
@@ -62,6 +64,22 @@ a fresh database and one already at an older revision.
 | `FC_DEFAULT_IMAGE`| _(unset)_          | Fallback rootfs filename when a version has no image   |
 | `FC_WORK_DIR`     | OS temp dir        | Per-VM working dirs (sockets, writable rootfs, logs)   |
 
+World persistence (P5) is off until you opt in:
+
+| Variable          | Default            | Description                                            |
+| ----------------- | ------------------ | ------------------------------------------------------ |
+| `FC_WORLD_PERSIST`| `false`            | Attach a per-server world disk overlaid on the rootfs (needs `mkfs.ext4` + a guest kernel with `CONFIG_OVERLAY_FS`/`CONFIG_EXT4_FS`) |
+| `FC_DATA_DIR`     | `worlds/` under `FC_WORK_DIR` | Where per-server world disks live (survive stop/start) |
+| `FC_WORLD_DISK_MB`| driver default     | Size of a freshly created world disk                   |
+| `FC_MKFS_EXT4`    | PATH lookup        | `mkfs.ext4` executable                                 |
+| `FC_WORLD_STORE_DIR` | _(unset)_       | Directory/NFS mount used as the durable world store (restore-on-boot, snapshot-on-stop, cross-host reschedule) |
+| `FC_WORLD_STORE_S3_*` | _(unset)_       | S3-compatible world store (`_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`, `_USE_SSL`, `_PREFIX`); **takes precedence** over `FC_WORLD_STORE_DIR` |
+| `FC_SNAPSHOT_INTERVAL` | `0` (off)      | Periodic application-consistent snapshots of running VMs (needs a world store) |
+| `FC_RCON_PORT` / `FC_RCON_PASSWORD` | _(unset)_ | Let the guest flush the workload via RCON before freezing its disk for a live snapshot |
+
+The eBPF NAT dataplane (P6) activates automatically on a Linux ≥6.6 agent host
+with `nf_conntrack`/`nf_nat` available; it needs no extra env to run.
+
 `AGENT_ID`, `AGENT_HOSTNAME`, `ZONE`, `CPUS_TOTAL`, `MEMORY_MB_TOTAL`, and
 `AGENT_VERSION` further describe the host in its registration.
 
@@ -81,6 +99,7 @@ a fresh database and one already at an older revision.
 | GET    | `/api/v1/servers/:id`    | Bearer | Get one of your servers             |
 | PATCH  | `/api/v1/servers/:id`    | Bearer | Rename, or set `desired_state` (running/stopped) |
 | DELETE | `/api/v1/servers/:id`    | Bearer | Tear down a server (`202`)          |
+| POST   | `/api/v1/servers/:id/snapshot` | Bearer | Request an on-demand world backup |
 | GET    | `/api/v1/templates`      | Bearer | List marketplace templates          |
 | GET    | `/api/v1/templates/:id`  | Bearer | Get one template's manifest         |
 | GET    | `/api/v1/admin/users`    | Admin  | List all users (role `admin` only)  |
@@ -200,21 +219,34 @@ period) **but keeps the rootfs** so the world survives a restart on that host;
 `Start` re-boots from it. `make test-kvm` runs the gated lifecycle integration
 test on a `/dev/kvm` host.
 
-**Image pipeline.** `internal/image` converts an OCI/Docker image into a
-read-only **squashfs** rootfs (`internal/squashfs`), injecting the Go init binary
-(`cmd/init`) as PID 1. The init agent mounts the kernel filesystems, fetches a
-**run spec** (`internal/runspec`) from Firecracker's MMDS over the link-local
-address, applies per-VM networking, then execs and supervises the workload —
-powering the VM off when it exits. The control plane resolves launchable
-templates from a marketplace registry (`internal/registry`, the `/templates`
-API).
+**World persistence (P5).** With `FC_WORLD_PERSIST` on, each server gets a
+writable **world disk** (`/dev/vdb`, ext4) overlaid by the guest onto the
+workload's working dir, so worlds survive stop/start. A durable **world store**
+(`FC_WORLD_STORE_DIR` or `FC_WORLD_STORE_S3_*`) restores a world on Provision and
+snapshots it on Stop — which is what makes a cross-host reschedule safe. Live
+snapshots quiesce the running game (RCON `save-off`/`save-all flush` +
+`fsfreeze`) over a vsock control channel, and a control-plane reaper GCs orphan
+worlds.
 
-**Networking (P6, in progress).** An eBPF NAT dataplane gives each VM real
-connectivity with no Linux bridge and no iptables/nftables rules: TCX-attached
-programs SNAT egress and DNAT a per-server host port to the in-VM service port,
-reusing the kernel's `nf_conntrack` via `bpf_ct_*` kfuncs. The guest applies its
-address, gateway neighbor, and default route from the run spec. Design and
-current status: [docs/ebpf-nat-dataplane.md](docs/ebpf-nat-dataplane.md).
+**Image pipeline.** `internal/image` converts an OCI/Docker image into a
+read-only **squashfs** rootfs (`internal/squashfs`, a from-scratch writer),
+injecting the Go init binary (`cmd/init`) as PID 1. The init agent mounts the
+kernel filesystems, fetches a **run spec** (`internal/runspec`) from Firecracker's
+MMDS over the link-local address, applies per-VM networking + the persist overlay,
+then execs and supervises the workload — powering the VM off when it exits. This
+pipeline is built and tested, but **not yet wired in as the runtime's rootfs
+source**: production `Provision` still boots the per-version `.ext4` catalog above
+(`root=/dev/vda rw`), with the run-spec/persist/NAT machinery layered on top. The
+control plane resolves launchable templates from a marketplace registry
+(`internal/registry`, the `/templates` API).
+
+**Networking (P6).** An eBPF NAT dataplane gives each VM real connectivity with
+no Linux bridge and no iptables/nftables rules: TCX-attached programs SNAT egress
+and DNAT a per-server host port (allocated by an in-agent IPAM) to the in-VM
+service port, reusing the kernel's `nf_conntrack` via `bpf_ct_*` kfuncs. The
+allocated host/port is written back to the game server, and the guest applies its
+address, gateway neighbor, and default route from the run spec. Needs a Linux ≥6.6
+agent host. Design and status: [docs/ebpf-nat-dataplane.md](docs/ebpf-nat-dataplane.md).
 
 ## Layout
 
@@ -254,6 +286,7 @@ make build-agent  # build agent to ./bin/agent
 make test         # run unit tests
 make test-e2e     # run end-to-end tests (requires Docker)
 make test-kvm     # Firecracker lifecycle test (requires /dev/kvm + host artifacts)
+make test-bpf     # eBPF NAT/tapfilter dataplane in-kernel (sudo; Linux ≥6.6)
 make bpf-generate # regenerate eBPF bindings/objects (Linux ≥6.6 + clang/libbpf/bpftool)
 make tidy         # tidy go.mod
 make fmt          # format code

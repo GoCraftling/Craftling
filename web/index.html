@@ -431,7 +431,7 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
         <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2.7l7 2.6v5.4c0 4.3-2.9 7.6-7 9-4.1-1.4-7-4.7-7-9V5.3z"/><path d="M9 12l2 2 4-4"/></svg></div>
         <h3>Firecracker isolation</h3>
         <p>Each server boots in its own microVM with a dedicated kernel and rootfs — true hardware-level isolation between tenants, not shared containers.</p>
-        <div class="tags"><span class="ftag">jailer</span><span class="ftag">vCPU / mem from spec</span></div>
+        <div class="tags"><span class="ftag">dedicated kernel</span><span class="ftag">vCPU / mem from spec</span></div>
       </div>
       <div class="fcard reveal">
         <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="3.5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6" rx="1.5"/><path d="M7 6.5h.01M7 16.5h.01"/></svg></div>
@@ -454,7 +454,7 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
       <div class="fcard reveal">
         <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3.5 12h17M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/></svg></div>
         <h3>eBPF networking & flow telemetry</h3>
-        <p>Each VM gets a private IP and a published host port — SNAT out, DNAT in — on an eBPF/TCX dataplane riding kernel <span class="mono" style="font-size:13px">nf_conntrack</span>. No Linux bridge, no iptables. Every flow emits an event; per-VM byte, packet, and drop counters stream to Prometheus.</p>
+        <p>Each VM gets a private IP and a published host port — SNAT out, DNAT in — on an eBPF/TCX dataplane riding kernel <span class="mono" style="font-size:13px">nf_conntrack</span>. No Linux bridge, no iptables. Every flow emits an event, and per-VM byte, packet, and drop counters are tracked in eBPF maps.</p>
         <div class="tags"><span class="ftag">per-VM SNAT/DNAT</span><span class="ftag">nf_conntrack kfuncs</span><span class="ftag">per-flow events</span></div>
       </div>
     </div>
@@ -501,7 +501,7 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
         <div class="lstep reveal"><div class="n">1</div><div><h4>You declare intent</h4><p>Create a server with a version and size, or flip it between running and stopped — through the console or API. That's a write to <span class="mono" style="font-size:13px">desired_state</span>, nothing more.</p></div></div>
         <div class="lstep reveal"><div class="n">2</div><div><h4>Scheduler places it</h4><p>If a running server has no host, the scheduler picks a ready host with capacity and reserves it atomically — or marks it unschedulable and retries.</p></div></div>
         <div class="lstep reveal"><div class="n">3</div><div><h4>Agent enacts on the host</h4><p>The control plane calls down to the host agent, which boots the Firecracker microVM. The control plane itself never touches KVM.</p></div></div>
-        <div class="lstep reveal"><div class="n">4</div><div><h4>Status flows back up</h4><p>Agents heartbeat observed per-VM status, which reconciles into each server's status — with retry and exponential backoff on failure.</p></div></div>
+        <div class="lstep reveal"><div class="n">4</div><div><h4>Status flows back up</h4><p>Agents heartbeat observed per-VM status, which reconciles into each server's status, tick after tick, until it matches what you asked for.</p></div></div>
       </div>
     </div>
   </div>
@@ -528,8 +528,8 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
         <div class="tier">// host agent</div>
         <h3>Act</h3>
         <p>Runs on each KVM host. Owns the microVM runtime; reports status up.</p>
-        <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 2.5 4 13.5h7l-1 8 9-11h-7z"/></svg>Firecracker runtime<span class="mono">jailer</span></div>
-        <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg>Health probes<span class="mono">RCON</span></div>
+        <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 2.5 4 13.5h7l-1 8 9-11h-7z"/></svg>Firecracker runtime<span class="mono">KVM</span></div>
+        <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7"/></svg>World disk + snapshots<span class="mono">vsock</span></div>
         <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3.5 12h17"/></svg>eBPF NAT dataplane<span class="mono">nf_ct</span></div>
       </div>
       <div class="alayer">
@@ -538,7 +538,7 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
         <p>Durable record of intent, fleet, and worlds — survives any single node.</p>
         <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>PostgreSQL<span class="mono">migrations</span></div>
         <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7"/></svg>World store<span class="mono">S3</span></div>
-        <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2.5-7 4 16 2.5-9H21"/></svg>Metrics<span class="mono">Prometheus</span></div>
+        <div class="acomp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 3v6h-6M3.5 10A8.5 8.5 0 0 1 19.1 6.5"/></svg>World GC reaper<span class="mono">hourly</span></div>
       </div>
     </div>
     <div class="arch-note reveal">
@@ -554,7 +554,7 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
     <div class="shead center reveal">
       <span class="eyebrow"><span class="dot"></span>Roadmap</span>
       <h2>From control plane to production fleet</h2>
-      <p>A phased path, each milestone anchored to real code and verified end-to-end. The control plane, fleet, scheduler, agent split, Firecracker runtime, an eBPF NAT dataplane, and durable world persistence have shipped — reliability and quotas are next.</p>
+      <p>A phased path, each milestone anchored to real code and verified end-to-end. The control plane, fleet, scheduler, agent split, Firecracker runtime, an eBPF NAT dataplane, and durable world persistence have shipped — observability, reliability, and quotas are next.</p>
     </div>
     <div class="road">
       <div class="phase done reveal"><div class="pid"><span class="p">Foundation</span><span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg></span></div><h4>Control plane</h4><p>Auth, roles, owner-scoped CRUD, the reconciler, and the Provisioner seam — shipped and e2e-tested.</p></div>
@@ -564,7 +564,8 @@ footer{border-top:1px solid var(--border-soft);padding:46px 0 40px;margin-top:10
       <div class="phase done reveal"><div class="pid"><span class="p">P3</span><span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg></span></div><h4>Agent split</h4><p>A dedicated host-agent binary and a RemoteProvisioner — the reconciler's call becomes a network hop.</p></div>
       <div class="phase done reveal"><div class="pid"><span class="p">P4</span><span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg></span></div><h4>Firecracker runtime</h4><p>Real microVMs from a versioned Minecraft rootfs — kernel + JRE + server jar, RCON enabled.</p></div>
       <div class="phase done reveal"><div class="pid"><span class="p">P5</span><span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg></span></div><h4>World persistence</h4><p>A per-server world disk overlaid on the read-only rootfs; an S3/dir WorldStore with restore-on-boot, consistent live snapshots, on-demand backups, and orphan GC.</p></div>
-      <div class="phase done reveal"><div class="pid"><span class="p">P6&nbsp;·&nbsp;P7</span><span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg></span></div><h4>Networking & health</h4><p>Per-VM eBPF SNAT/DNAT over nf_conntrack — no bridge, no iptables — with host-port publish, egress/ingress ACLs, per-flow telemetry, and RCON/SLP probes.</p></div>
+      <div class="phase done reveal"><div class="pid"><span class="p">P6</span><span class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5l4.5 4.5L19.5 7"/></svg></span></div><h4>Networking</h4><p>Per-VM eBPF SNAT/DNAT over nf_conntrack — no bridge, no iptables — with a published host port written back to each server and per-flow telemetry in eBPF maps.</p></div>
+      <div class="phase reveal"><div class="pid"><span class="p">P7</span></div><h4>Observability</h4><p>Deep health via RCON / Server-List-Ping probes (player count, MOTD) and Prometheus <span class="mono" style="font-size:12px">/metrics</span> across the control plane and agents.</p></div>
       <div class="phase reveal"><div class="pid"><span class="p">P8</span></div><h4>Reliability</h4><p>Retry with backoff, host-failure rescheduling with fencing, draining, and optional leader election.</p></div>
       <div class="phase reveal"><div class="pid"><span class="p">P9</span></div><h4>Quotas</h4><p>Per-user limits on servers, vCPU, and memory — enforced at create and update.</p></div>
       <div class="phase reveal"><div class="pid"><span class="p">P10</span></div><h4>Hardening & ops</h4><p>Agent-to-plane mTLS, secrets management, isolation review, and the split deploy topology.</p></div>
