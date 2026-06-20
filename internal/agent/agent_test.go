@@ -2,11 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"net/http/httptest"
 	"testing"
 
-	"go.uber.org/zap"
+	pb "github.com/aarani/craftling-go/internal/agentlink/pb"
 )
 
 // TestFakeRuntimeLifecycle exercises the in-memory runtime directly through its
@@ -63,74 +63,53 @@ func TestFakeRuntimeIdempotency(t *testing.T) {
 	}
 }
 
-// TestAgentServerClientRoundTrip drives the runtime through the HTTP API the
-// control plane uses, verifying the wire contract end-to-end.
-func TestAgentServerClientRoundTrip(t *testing.T) {
+// TestExecOpDispatch verifies the link's command dispatch: each op reaches the
+// runtime, results are JSON-encoded the way the hub decodes them, and an unknown
+// op surfaces an error rather than panicking. This is the agent half of the
+// control-plane → agent command contract.
+func TestExecOpDispatch(t *testing.T) {
 	ctx := context.Background()
-	srv := httptest.NewServer(NewRouter(NewFakeRuntime("10.0.0.9"), zap.NewNop()))
-	defer srv.Close()
+	rt := NewFakeRuntime("10.0.0.9")
 
-	client := NewClient(nil)
-	base := srv.URL
-
-	vm, err := client.Provision(ctx, base, VMSpec{ServerID: "s2", Version: "1.20.4", CPUs: 1, MemoryMB: 1024})
-	if err != nil {
-		t.Fatalf("provision: %v", err)
+	// Provision returns a running VM payload, no error.
+	specJSON, _ := json.Marshal(VMSpec{ServerID: "s2", Version: "1.20.4", CPUs: 1, MemoryMB: 1024})
+	payload, errStr := execOp(ctx, rt, &pb.Command{Op: OpProvision, Payload: specJSON})
+	if errStr != "" {
+		t.Fatalf("provision op error = %q, want none", errStr)
 	}
-	if vm == nil || vm.ID == "" || vm.State != StateRunning {
+	var vm VM
+	if err := json.Unmarshal(payload, &vm); err != nil {
+		t.Fatalf("decode provision result: %v", err)
+	}
+	if vm.ID == "" || vm.State != StateRunning {
 		t.Fatalf("provisioned vm = %+v, want running with id", vm)
 	}
-	if vm.Host != "10.0.0.9" || vm.Port != defaultMinecraftPort {
-		t.Errorf("connect = %s:%d, want 10.0.0.9:%d", vm.Host, vm.Port, defaultMinecraftPort)
+
+	ref, _ := json.Marshal(VMRef{VMID: vm.ID})
+
+	// Stop then Status reflects the stopped state across the seam.
+	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpStop, Payload: ref}); errStr != "" {
+		t.Fatalf("stop op error = %q, want none", errStr)
+	}
+	statusPayload, errStr := execOp(ctx, rt, &pb.Command{Op: OpStatus, Payload: ref})
+	if errStr != "" {
+		t.Fatalf("status op error = %q, want none", errStr)
+	}
+	var stopped VM
+	_ = json.Unmarshal(statusPayload, &stopped)
+	if stopped.State != StateStopped {
+		t.Errorf("status after stop = %q, want stopped", stopped.State)
 	}
 
-	if got := statusOf(t, client, base, vm.ID); got != StateRunning {
-		t.Errorf("after provision state = %q, want running", got)
-	}
-	if err := client.Stop(ctx, base, vm.ID); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	if got := statusOf(t, client, base, vm.ID); got != StateStopped {
-		t.Errorf("after stop state = %q, want stopped", got)
-	}
-	if _, err := client.Start(ctx, base, vm.ID); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if got := statusOf(t, client, base, vm.ID); got != StateRunning {
-		t.Errorf("after start state = %q, want running", got)
-	}
-	if err := client.Deprovision(ctx, base, vm.ID); err != nil {
-		t.Fatalf("deprovision: %v", err)
-	}
-	if got := statusOf(t, client, base, vm.ID); got != StateMissing {
-		t.Errorf("after deprovision state = %q, want missing", got)
+	// Starting a VM the runtime does not know surfaces an error string.
+	ghost, _ := json.Marshal(VMRef{VMID: "vm-ghost"})
+	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpStart, Payload: ghost}); errStr == "" {
+		t.Error("start unknown vm: expected error string, got none")
 	}
 
-	// Starting a VM the agent does not know is an error over the wire.
-	if _, err := client.Start(ctx, base, "vm-ghost"); err == nil {
-		t.Error("start unknown vm: expected error, got nil")
-	}
-}
-
-// TestAgentSnapshotRoundTrip exercises the on-demand snapshot endpoint over the
-// real HTTP seam: a known VM succeeds (the fake runtime no-ops), an unknown one
-// surfaces a not-found error to the caller.
-func TestAgentSnapshotRoundTrip(t *testing.T) {
-	ctx := context.Background()
-	srv := httptest.NewServer(NewRouter(NewFakeRuntime("10.0.0.9"), zap.NewNop()))
-	defer srv.Close()
-	client := NewClient(nil)
-	base := srv.URL
-
-	vm, err := client.Provision(ctx, base, VMSpec{ServerID: "s3", CPUs: 1, MemoryMB: 1024})
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	if err := client.Snapshot(ctx, base, vm.ID); err != nil {
-		t.Fatalf("snapshot known vm: %v", err)
-	}
-	if err := client.Snapshot(ctx, base, "vm-ghost"); err == nil {
-		t.Error("snapshot unknown vm: expected error, got nil")
+	// An unrecognized op is reported, not fatal.
+	if _, errStr := execOp(ctx, rt, &pb.Command{Op: "bogus"}); errStr == "" {
+		t.Error("unknown op: expected error string, got none")
 	}
 }
 
@@ -143,13 +122,4 @@ func assertState(t *testing.T, rt Runtime, vmID, want string) {
 	if vm.State != want {
 		t.Fatalf("state = %q, want %q", vm.State, want)
 	}
-}
-
-func statusOf(t *testing.T, c *Client, base, vmID string) string {
-	t.Helper()
-	vm, err := c.Status(context.Background(), base, vmID)
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	return vm.State
 }
