@@ -335,6 +335,17 @@ type dataplaneConfig struct {
 	portMax    uint16
 }
 
+// provisionRef chooses the OCI image to boot for a provision: a marketplace
+// template's authoritative image (imageRef, resolved by the control plane) when
+// set, otherwise the host's configured, version-templated default. Keeping the
+// choice here makes it unit-testable without a microVM.
+func (c *Config) provisionRef(imageRef, version string) (string, error) {
+	if imageRef != "" {
+		return imageRef, nil
+	}
+	return c.imageRefFor(version)
+}
+
 // imageRefFor resolves the OCI image reference the driver converts for a
 // server. A templated ImageRef (one containing "{version}") is filled in from
 // the spec's version, falling back to DefaultImageRef when the spec carries no

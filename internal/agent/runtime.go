@@ -41,6 +41,12 @@ type VMSpec struct {
 	CPUs     int    `json:"cpus"`
 	MemoryMB int    `json:"memory_mb"`
 
+	// ImageRef is the exact OCI image the VM must boot, resolved by the control
+	// plane from a marketplace template. When set the Firecracker driver converts
+	// it instead of its configured FC_IMAGE_REF default; empty falls back to that
+	// default (the direct, version-templated path).
+	ImageRef string `json:"image_ref,omitempty"`
+
 	// RunSpec is the OCI-derived command/env/workdir the guest init
 	// agent should exec, distilled by internal/image at image-pull time.
 	// When set, the Firecracker driver publishes it into the VM's MMDS at

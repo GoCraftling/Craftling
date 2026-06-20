@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/aarani/craftling-go/internal/model"
@@ -22,7 +23,8 @@ func NewGameServerRepository(pool *pgxpool.Pool) *GameServerRepository {
 
 const gameServerColumns = `id, owner_id, name, game, version, cpus, memory_mb,
 	desired_state, status, host_id, vm_id, host, port, status_message,
-	backup_requested, last_backup_at, created_at, updated_at`
+	backup_requested, last_backup_at, template_id, image_ref, env,
+	created_at, updated_at`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows.
 type scannable interface {
@@ -31,27 +33,48 @@ type scannable interface {
 
 func scanGameServer(row scannable) (*model.GameServer, error) {
 	var s model.GameServer
+	// env is decoded from its jsonb column through raw bytes (NULL -> nil) rather
+	// than relying on pgx's map codec to round-trip a NULL.
+	var envJSON []byte
 	err := row.Scan(
 		&s.ID, &s.OwnerID, &s.Name, &s.Game, &s.Version, &s.CPUs, &s.MemoryMB,
 		&s.DesiredState, &s.Status, &s.HostID, &s.VMID, &s.Host, &s.Port, &s.StatusMessage,
-		&s.BackupRequested, &s.LastBackupAt, &s.CreatedAt, &s.UpdatedAt,
+		&s.BackupRequested, &s.LastBackupAt, &s.TemplateID, &s.ImageRef, &envJSON,
+		&s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
+	if len(envJSON) > 0 {
+		if err := json.Unmarshal(envJSON, &s.Env); err != nil {
+			return nil, err
+		}
+	}
 	return &s, nil
 }
 
-// Create inserts a new game server, populating its ID and timestamps.
+// Create inserts a new game server, populating its ID and timestamps. The
+// template columns (template_id, image_ref, env) are written when set and left
+// NULL for a direct (name + version) create.
 func (r *GameServerRepository) Create(ctx context.Context, s *model.GameServer) error {
 	s.ID = uuid.NewString()
+	var envJSON []byte
+	if len(s.Env) > 0 {
+		b, err := json.Marshal(s.Env)
+		if err != nil {
+			return err
+		}
+		envJSON = b
+	}
 	const q = `
 		INSERT INTO game_servers
-			(id, owner_id, name, game, version, cpus, memory_mb, desired_state, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			(id, owner_id, name, game, version, cpus, memory_mb, desired_state, status,
+			 template_id, image_ref, env)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING created_at, updated_at`
 	return r.pool.QueryRow(ctx, q,
 		s.ID, s.OwnerID, s.Name, s.Game, s.Version, s.CPUs, s.MemoryMB, s.DesiredState, s.Status,
+		s.TemplateID, s.ImageRef, envJSON,
 	).Scan(&s.CreatedAt, &s.UpdatedAt)
 }
 

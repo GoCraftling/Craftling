@@ -153,7 +153,7 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 	// rootfs for this server's image, and take the RunSpec the converter
 	// distilled from the OCI config. The rootfs is shared across VMs booting the
 	// same image — it is attached read-only, so there is no per-VM copy.
-	ref, err := r.cfg.imageRefFor(spec.Version)
+	ref, err := r.cfg.provisionRef(spec.ImageRef, spec.Version)
 	if err != nil {
 		return nil, err
 	}

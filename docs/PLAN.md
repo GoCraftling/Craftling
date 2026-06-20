@@ -194,7 +194,9 @@ it is feature-complete for IPv4 TCP/UDP.)*
   `Dockerfile.agent` (debian-slim + firecracker + e2fsprogs + kmod, privileged,
   `/dev/kvm`), `docker-compose.yml` (Postgres + server + nginx frontend + agent).
 - **Frontend** (`frontend/src`, React/Vite): auth screen, servers view (CRUD,
-  restart, snapshot), marketplace/templates view; hosts/scheduler/quotas are
+  restart, snapshot), marketplace/templates view (configure a template and launch
+  a real server — the control plane resolves image + env server-side); then it
+  hands off to the servers view to watch provisioning. hosts/scheduler/quotas are
   stub routes. Calls the control-plane API via `lib/api.ts` with transparent
   refresh-token rotation. No hosts/metrics/health UI yet.
 

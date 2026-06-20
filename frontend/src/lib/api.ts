@@ -60,9 +60,17 @@ export interface ApiServer {
 
 export interface CreateServerInput {
   name: string
-  version: string
   cpus?: number
   memory_mb?: number
+  // Direct create: the OCI image tag the agent's default image is templated with.
+  // Omitted for a template launch.
+  version?: string
+  // Template launch: the control plane resolves the image + env server-side from
+  // the trusted registry. answers maps each template variable to the chosen value;
+  // eula_accepted must be true when the template requires it.
+  template_id?: string
+  answers?: Record<string, string>
+  eula_accepted?: boolean
 }
 
 export interface UpdateServerInput {
