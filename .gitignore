@@ -3,6 +3,10 @@
 *.exe
 *.out
 
+# Local Firecracker assets: kernel image, converted rootfs cache, and per-VM
+# work dirs the agent creates at runtime (some root-owned). Not source.
+/fc-assets/
+
 # Environment
 .env
 
