@@ -6,6 +6,7 @@ import {
   type ButtonHTMLAttributes,
   type ReactNode,
 } from "react"
+import { createPortal } from "react-dom"
 import { Icon } from "./icon"
 import type { ServerStatus } from "@/lib/data"
 
@@ -72,7 +73,10 @@ export function StatusBadge({ state }: { state: ServerStatus }) {
   )
 }
 
-/* dismiss-on-outside-click menu */
+/* dismiss-on-outside-click menu.
+   The dropdown is portaled to <body> with fixed positioning anchored to the
+   trigger, so it overlays the page instead of being clipped by an ancestor's
+   overflow (e.g. the table card's `overflow: hidden`). */
 export function Menu({
   trigger,
   children,
@@ -85,27 +89,61 @@ export function Menu({
   width?: number
 }) {
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left?: number; right?: number }>()
   useEffect(() => {
     if (!open) return
-    const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    const place = () => {
+      const el = triggerRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      setPos(
+        align === "right"
+          ? { top: r.bottom + 6, right: window.innerWidth - r.right }
+          : { top: r.bottom + 6, left: r.left },
+      )
     }
-    document.addEventListener("mousedown", h)
-    return () => document.removeEventListener("mousedown", h)
-  }, [open])
+    place()
+    const onClick = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (
+        !triggerRef.current?.contains(t) &&
+        !menuRef.current?.contains(t)
+      )
+        setOpen(false)
+    }
+    document.addEventListener("mousedown", onClick)
+    window.addEventListener("resize", place)
+    window.addEventListener("scroll", place, true)
+    return () => {
+      document.removeEventListener("mousedown", onClick)
+      window.removeEventListener("resize", place)
+      window.removeEventListener("scroll", place, true)
+    }
+  }, [open, align])
   return (
-    <div ref={ref} style={{ position: "relative" }}>
+    <div ref={triggerRef} style={{ position: "relative" }}>
       {trigger(open, () => setOpen((o) => !o))}
-      {open && (
-        <div
-          className="menu"
-          style={{ [align]: 0, top: "calc(100% + 6px)", minWidth: width }}
-          onClick={() => setOpen(false)}
-        >
-          {children}
-        </div>
-      )}
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="menu"
+            style={{
+              position: "fixed",
+              top: pos.top,
+              left: pos.left,
+              right: pos.right,
+              minWidth: width,
+            }}
+            onClick={() => setOpen(false)}
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }
