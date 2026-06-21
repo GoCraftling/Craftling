@@ -174,8 +174,6 @@ type QuiesceConfig struct {
 	// RCONAddress is the in-VM address of the workload's RCON endpoint
 	// (e.g. "127.0.0.1:25575"). Empty skips the application flush.
 	RCONAddress string `json:"rcon_address,omitempty"`
-	// RCONPassword authenticates to RCON.
-	RCONPassword string `json:"rcon_password,omitempty"`
 }
 
 // VsockControlPort is the guest AF_VSOCK port the snapshot control server

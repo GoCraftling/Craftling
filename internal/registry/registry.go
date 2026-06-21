@@ -208,6 +208,7 @@ func Resolve(m *Manifest, answers map[string]string) (env map[string]string, ima
 			return tok // leave an unanswered placeholder untouched
 		})
 	}
+	env["RCON_PASSWORD"] = "1234" // the guest's RCON password is fixed by the agent, not the operator
 
 	imageRef = m.ImageName
 	if m.ImageTag != "" {

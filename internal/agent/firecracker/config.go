@@ -155,10 +155,6 @@ type Config struct {
 	// RCONPort is the in-VM RCON port the guest flushes through before a live
 	// snapshot. Default DefaultRCONPort.
 	RCONPort int
-	// RCONPassword authenticates to the in-VM RCON. Empty means snapshots
-	// freeze the disk without an application flush (filesystem-consistent
-	// only). Shared across the agent's servers for now.
-	RCONPassword string
 	// Logger is used for best-effort background work (the periodic snapshot
 	// sweep). Nil is replaced with a no-op logger.
 	Logger *zap.Logger

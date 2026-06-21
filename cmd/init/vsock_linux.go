@@ -146,7 +146,7 @@ func handleSnapshotConn(logger *zap.Logger, conn *os.File, q *runspec.QuiesceCon
 // not — we still freeze for a filesystem-consistent snapshot rather than abort.
 func prepareSnapshot(logger *zap.Logger, q *runspec.QuiesceConfig) (int, error) {
 	if q != nil && q.RCONAddress != "" {
-		if _, err := minecraft.RCONExec(q.RCONAddress, q.RCONPassword, 0, "save-off", "save-all flush"); err != nil {
+		if _, err := minecraft.RCONExec(q.RCONAddress, 0, "save-off", "save-all flush"); err != nil {
 			logger.Warn("init: rcon flush before freeze failed; freezing anyway", zap.Error(err))
 		}
 	}
@@ -168,7 +168,7 @@ func prepareSnapshot(logger *zap.Logger, q *runspec.QuiesceConfig) (int, error) 
 // resumeSnapshot re-enables workload saves after a thaw (best-effort).
 func resumeSnapshot(logger *zap.Logger, q *runspec.QuiesceConfig) {
 	if q != nil && q.RCONAddress != "" {
-		if _, err := minecraft.RCONExec(q.RCONAddress, q.RCONPassword, 0, "save-on"); err != nil {
+		if _, err := minecraft.RCONExec(q.RCONAddress, 0, "save-on"); err != nil {
 			logger.Warn("init: rcon save-on after thaw failed", zap.Error(err))
 		}
 	}
@@ -197,7 +197,7 @@ func probeHealth(logger *zap.Logger, q *runspec.QuiesceConfig) runspec.Health {
 	}
 
 	if q != nil && q.RCONAddress != "" {
-		if bodies, err := minecraft.RCONExec(q.RCONAddress, q.RCONPassword, healthProbeTimeout, "list"); err != nil {
+		if bodies, err := minecraft.RCONExec(q.RCONAddress, healthProbeTimeout, "list"); err != nil {
 			logger.Debug("init: rcon list failed", zap.Error(err))
 		} else if len(bodies) > 0 {
 			if online, max, ok := minecraft.ParsePlayerList(bodies[0]); ok {

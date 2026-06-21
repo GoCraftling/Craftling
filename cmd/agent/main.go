@@ -106,7 +106,6 @@ func newRuntime(cfg *config.Config, log *zap.Logger) (agent.Runtime, error) {
 			WorldStore:       worldStore,
 			SnapshotInterval: cfg.Agent.Firecracker.SnapshotInterval,
 			RCONPort:         cfg.Agent.Firecracker.RCONPort,
-			RCONPassword:     cfg.Agent.Firecracker.RCONPassword,
 			HealthInterval:   cfg.Agent.Firecracker.HealthInterval,
 			Logger:           log,
 		})

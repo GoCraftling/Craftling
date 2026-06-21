@@ -77,7 +77,7 @@ World persistence (P5) is off until you opt in:
 | `FC_WORLD_STORE_DIR` | _(unset)_       | Directory/NFS mount used as the durable world store (restore-on-boot, snapshot-on-stop, cross-host reschedule) |
 | `FC_WORLD_STORE_S3_*` | _(unset)_       | S3-compatible world store (`_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`, `_USE_SSL`, `_PREFIX`); **takes precedence** over `FC_WORLD_STORE_DIR` |
 | `FC_SNAPSHOT_INTERVAL` | `0` (off)      | Periodic application-consistent snapshots of running VMs (needs a world store) |
-| `FC_RCON_PORT` / `FC_RCON_PASSWORD` | _(unset)_ | Let the guest flush the workload via RCON before freezing its disk for a live snapshot |
+| `FC_RCON_PORT`         | _(unset)_ | Let the guest flush the workload via RCON before freezing its disk for a live snapshot |
 | `FC_UPLINK`       | _(unset)_          | Host NIC (e.g. `eth0`, `ens5`) the eBPF NAT dataplane attaches to. **Setting it turns on per-server host ports**; left unset, every VM falls back to `25565`, so multiple servers on one host collide on the same port |
 | `FC_VM_SUBNET`    | `10.222.0.0/16`    | CIDR private VM addresses are drawn from (only with `FC_UPLINK`)        |
 | `FC_GATEWAY_IP`   | first usable host  | Shared virtual gateway VMs route through; must fall inside `FC_VM_SUBNET` |

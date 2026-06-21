@@ -92,8 +92,10 @@ func fakeRCONServer(t *testing.T, password, reply string) string {
 }
 
 func TestRCONExecListReply(t *testing.T) {
-	addr := fakeRCONServer(t, "pw", "There are 2 of a max of 10 players online: a, b")
-	bodies, err := RCONExec(addr, "pw", time.Second, "list")
+	// RCONExec authenticates with the agent's fixed password ("1234"), so the
+	// server must accept it for the exchange to succeed.
+	addr := fakeRCONServer(t, "1234", "There are 2 of a max of 10 players online: a, b")
+	bodies, err := RCONExec(addr, time.Second, "list")
 	if err != nil {
 		t.Fatalf("RCONExec: %v", err)
 	}
@@ -107,8 +109,9 @@ func TestRCONExecListReply(t *testing.T) {
 }
 
 func TestRCONExecBadPassword(t *testing.T) {
-	addr := fakeRCONServer(t, "pw", "")
-	if _, err := RCONExec(addr, "wrong", time.Second, "list"); err != ErrRCONAuthFailed {
+	// A server configured with a different password rejects the fixed one.
+	addr := fakeRCONServer(t, "some-other-password", "")
+	if _, err := RCONExec(addr, time.Second, "list"); err != ErrRCONAuthFailed {
 		t.Fatalf("err = %v, want ErrRCONAuthFailed", err)
 	}
 }

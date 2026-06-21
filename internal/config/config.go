@@ -145,11 +145,10 @@ type FirecrackerConfig struct {
 	// SnapshotInterval, when > 0, turns on periodic application-consistent
 	// snapshots of running servers (P5c). Needs a world store.
 	SnapshotInterval time.Duration
-	// RCONPort / RCONPassword let the guest flush the workload via RCON
+	// RCONPort let the guest flush the workload via RCON
 	// before freezing its disk for a live snapshot. Empty password = freeze
 	// only (filesystem-consistent).
 	RCONPort     int
-	RCONPassword string
 	// HealthInterval is how often the agent probes each running VM's deep health
 	// (P7: player count, liveness) over the vsock control channel. 0 uses the
 	// driver default.
@@ -220,7 +219,6 @@ func Load() *Config {
 				},
 				SnapshotInterval: getDurationEnv("FC_SNAPSHOT_INTERVAL", 0),
 				RCONPort:         getIntEnv("FC_RCON_PORT", 0),
-				RCONPassword:     getEnv("FC_RCON_PASSWORD", ""),
 				HealthInterval:   getDurationEnv("FC_HEALTH_INTERVAL", 0),
 			},
 			ID:            getEnv("AGENT_ID", ""),

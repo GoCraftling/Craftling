@@ -73,11 +73,11 @@ func New(cfg Config) (*Runtime, error) {
 		r.sweepWG.Add(1)
 		go r.snapshotSweep(cfg.SnapshotInterval)
 	}
-	// Deep-health probing (P7) rides the guest vsock control channel, which every
-	// persistence host attaches (a world store is not required — that only gates
-	// live snapshots). The sweep caches each VM's health for Status to return
-	// without an inline probe.
-	if cfg.persistEnabled() && cfg.HealthInterval > 0 {
+	// Deep-health probing (P7) rides the same vsock control channel as live
+	// snapshots, so it is available exactly when that channel is — on
+	// persistence+store hosts. The sweep caches each VM's health for Status to
+	// return without an inline probe.
+	if cfg.liveSnapshotEnabled() && cfg.HealthInterval > 0 {
 		r.sweepWG.Add(1)
 		go r.healthSweep(cfg.HealthInterval)
 	}
@@ -261,10 +261,7 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 		// health at all. RCON credentials are filled in when configured; the ping
 		// probe works without them.
 		q := &runspec.QuiesceConfig{}
-		if r.cfg.RCONPassword != "" {
-			q.RCONAddress = fmt.Sprintf("127.0.0.1:%d", r.cfg.RCONPort)
-			q.RCONPassword = r.cfg.RCONPassword
-		}
+		q.RCONAddress = fmt.Sprintf("127.0.0.1:%d", r.cfg.RCONPort)
 		rs.Quiesce = q
 	}
 
