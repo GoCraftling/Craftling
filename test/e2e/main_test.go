@@ -105,6 +105,16 @@ func TestMain(m *testing.M) {
 		JWTSecret:  "test-secret",
 		AccessTTL:  time.Hour,
 		RefreshTTL: time.Hour,
+		// The quota and billing endpoints read these (the binary loads them from
+		// the environment; the harness sets them explicitly). The default quota is
+		// deliberately generous — positive, so the self-view default reads as a real
+		// cap, but high enough that the global per-user limit never interferes with
+		// the capacity/placement/lifecycle suites that create servers freely. The
+		// quota-enforcement tests set their own small per-user overrides. Billing
+		// uses the production-shaped price list so a running server accrues a
+		// non-zero, currency-tagged bill.
+		Quota:   config.QuotaConfig{MaxServers: 1000, MaxCPUs: 100000, MaxMemoryMB: 100000000},
+		Billing: config.BillingConfig{CPUHour: 0.012, MemoryGBHour: 0.006, Currency: "USD"},
 	}
 	hostRepo = repository.NewHostRepository()
 	gameServerRepo := repository.NewGameServerRepository(pool)
