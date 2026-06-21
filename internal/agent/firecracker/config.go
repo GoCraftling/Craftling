@@ -98,6 +98,12 @@ type Config struct {
 	// VMSubnet is the CIDR private VM addresses are drawn from. Default
 	// DefaultVMSubnet.
 	VMSubnet string
+	// GuestDNS are the resolvers written into each guest's /etc/resolv.conf so
+	// the workload can resolve names over the egress NAT (the read-only image
+	// ships no usable resolv.conf). Reached through the dataplane, so they must
+	// be routable from the VM subnet — public resolvers by default. Only used
+	// when the NAT dataplane is enabled. Empty defaults to DefaultGuestDNS.
+	GuestDNS []string
 	// GatewayIP is the shared virtual gateway address VMs route through. It is
 	// never assigned to a host interface (the dataplane redirects, it does not
 	// route). Must fall inside VMSubnet. Empty defaults to the first usable host.
@@ -162,6 +168,11 @@ const (
 	DefaultHostPortMin = 30000
 	DefaultHostPortMax = 40000
 )
+
+// DefaultGuestDNS are the resolvers written into a guest's /etc/resolv.conf when
+// GuestDNS is unset: Cloudflare and Google public DNS, reached over the egress
+// NAT. Both are anycast IPv4, so they work from any VM subnet.
+var DefaultGuestDNS = []string{"1.1.1.1", "8.8.8.8"}
 
 // World-persistence defaults (P5a).
 const (
@@ -315,6 +326,9 @@ func (c *Config) validateDataplane() error {
 	}
 	if c.HostPortMax == 0 {
 		c.HostPortMax = DefaultHostPortMax
+	}
+	if len(c.GuestDNS) == 0 {
+		c.GuestDNS = DefaultGuestDNS
 	}
 	// dataplaneConfig does the cross-field validation (parse + containment).
 	_, err := c.dataplaneConfig()

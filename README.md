@@ -81,6 +81,7 @@ World persistence (P5) is off until you opt in:
 | `FC_UPLINK`       | _(unset)_          | Host NIC (e.g. `eth0`, `ens5`) the eBPF NAT dataplane attaches to. **Setting it turns on per-server host ports**; left unset, every VM falls back to `25565`, so multiple servers on one host collide on the same port |
 | `FC_VM_SUBNET`    | `10.222.0.0/16`    | CIDR private VM addresses are drawn from (only with `FC_UPLINK`)        |
 | `FC_GATEWAY_IP`   | first usable host  | Shared virtual gateway VMs route through; must fall inside `FC_VM_SUBNET` |
+| `FC_GUEST_DNS`    | `1.1.1.1,8.8.8.8`  | Comma-separated resolvers written into each guest's `/etc/resolv.conf` so workloads can resolve names over the egress NAT (the read-only image ships none); reached through the dataplane, so they must be routable from the VM subnet (only with `FC_UPLINK`) |
 | `FC_HOST_PORT_MIN` / `FC_HOST_PORT_MAX` | `30000` / `40000` | Bounds of the public host-port pool DNAT'd to in-VM services (only with `FC_UPLINK`) |
 
 The eBPF NAT dataplane (P6) is gated on `FC_UPLINK`: set it to the host's egress
@@ -271,8 +272,10 @@ no Linux bridge and no iptables/nftables rules: TCX-attached programs SNAT egres
 and DNAT a per-server host port (allocated by an in-agent IPAM) to the in-VM
 service port, reusing the kernel's `nf_conntrack` via `bpf_ct_*` kfuncs. The
 allocated host/port is written back to the game server, and the guest applies its
-address, gateway neighbor, and default route from the run spec. Needs a Linux ≥6.6
-agent host. Design and status: [docs/ebpf-nat-dataplane.md](docs/ebpf-nat-dataplane.md).
+address, gateway neighbor, default route, and DNS resolvers (`FC_GUEST_DNS`,
+written to `/etc/resolv.conf` since the read-only image ships none) from the run
+spec. Needs a Linux ≥6.6 agent host. Design and status:
+[docs/ebpf-nat-dataplane.md](docs/ebpf-nat-dataplane.md).
 
 ## Layout
 

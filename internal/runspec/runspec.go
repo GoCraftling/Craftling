@@ -138,6 +138,11 @@ type NetConfig struct {
 	Gateway string `json:"gateway"`
 	// GatewayMAC is the MAC installed as Gateway's permanent neighbor.
 	GatewayMAC string `json:"gateway_mac"`
+	// Nameservers are the DNS resolvers written into the guest's
+	// /etc/resolv.conf so the workload can resolve names over the NAT
+	// dataplane (the read-only image ships no usable resolv.conf, and nothing
+	// else populates it). Empty means the guest keeps the image's resolv.conf.
+	Nameservers []string `json:"nameservers,omitempty"`
 }
 
 // PersistConfig is the guest-applied side of world persistence (P5). The

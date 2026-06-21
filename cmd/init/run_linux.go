@@ -93,6 +93,14 @@ func run(logger *zap.Logger) {
 		logger.Info("init: network configured",
 			zap.String("address", spec.Net.Address),
 			zap.String("gateway", spec.Net.Gateway))
+		// Give the workload a resolver: the read-only image ships no usable
+		// /etc/resolv.conf, so without this DNS fails and the server can't even
+		// download its jar. Best-effort — a workload that needs no DNS still runs.
+		if err := writeResolvConf(spec.Net.Nameservers); err != nil {
+			logger.Warn("init: write resolv.conf", zap.Error(err))
+		} else if len(spec.Net.Nameservers) > 0 {
+			logger.Info("init: resolv.conf written", zap.Strings("nameservers", spec.Net.Nameservers))
+		}
 	}
 
 	// Make WorkingDir durable before launching the workload, so the world it

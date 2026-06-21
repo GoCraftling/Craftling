@@ -93,6 +93,7 @@ func newRuntime(cfg *config.Config, log *zap.Logger) (agent.Runtime, error) {
 			UplinkDevice:     cfg.Agent.Firecracker.UplinkDevice,
 			VMSubnet:         cfg.Agent.Firecracker.VMSubnet,
 			GatewayIP:        cfg.Agent.Firecracker.GatewayIP,
+			GuestDNS:         cfg.Agent.Firecracker.GuestDNS,
 			HostPortMin:      uint16(cfg.Agent.Firecracker.HostPortMin),
 			HostPortMax:      uint16(cfg.Agent.Firecracker.HostPortMax),
 			AdvertiseHost:    cfg.Agent.AdvertiseHost,

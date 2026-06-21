@@ -38,10 +38,10 @@ services:
       ADMIN_PASSWORD: adminpassword
     ports:
       - "8082:8080"
-    # The gRPC AgentLink listener (default :8090) is reachable to agents over the
-    # compose network; no host publish is needed.
-    expose:
-      - "8090"
+      # The gRPC AgentLink listener (default :8090). Published to the host so the
+      # agent — which runs with host networking for the eBPF NAT dataplane and
+      # thus can't use compose DNS — can dial it at 127.0.0.1:8090.
+      - "8090:8090"
     depends_on:
       db:
         condition: service_healthy
@@ -73,8 +73,9 @@ services:
       APP_ENV: production
       # The agent dials this and holds a stream open; the control plane pushes VM
       # commands down it. No inbound address is advertised — the control plane
-      # never dials the agent.
-      CONTROL_PLANE_GRPC_ADDR: server:8090
+      # never dials the agent. With host networking (below) compose DNS is
+      # unavailable, so reach the server via its host-published gRPC port.
+      CONTROL_PLANE_GRPC_ADDR: 127.0.0.1:8090
       # Player-facing connect host VMs report (override for real connectivity).
       ADVERTISE_HOST: 127.0.0.1
       AGENT_RUNTIME: firecracker
@@ -88,6 +89,11 @@ services:
       # Where converted, content-addressed squashfs rootfs files are cached.
       FC_IMAGE_CACHE_DIR: /var/lib/craftling/images
       FC_WORK_DIR: /var/lib/craftling/work
+      # Give each VM a writable ext4 world disk overlaid on the workload's data
+      # dir (/data for itzg/minecraft-server). Without it the only filesystem is
+      # the read-only squashfs rootfs, so the server can't even write eula.txt
+      # and exits, halting the VM. Disk defaults to 4 GiB under FC_WORK_DIR/worlds.
+      FC_WORLD_PERSIST: "true"
       # NIC the eBPF NAT dataplane attaches to. Setting it gives each server a
       # distinct public host port from the FC_HOST_PORT_MIN–FC_HOST_PORT_MAX
       # pool; without it every VM falls back to 25565 and servers on this host
@@ -101,6 +107,11 @@ services:
       # Mount KVM so Firecracker can boot microVMs.
       - "/dev/kvm:/dev/kvm"
     privileged: true
+    # The eBPF NAT dataplane attaches TCX programs to the host egress NIC
+    # (FC_UPLINK, e.g. ens16) and creates TAP devices, all of which must live in
+    # the host network namespace. On the compose bridge the container only sees
+    # lo/eth0 and FC_UPLINK resolves to "no such network interface".
+    network_mode: host
     volumes:
       - ./fc-assets:/var/lib/craftling
     # No published ports: the agent serves no inbound API. It reaches the control

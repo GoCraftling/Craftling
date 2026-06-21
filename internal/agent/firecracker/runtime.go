@@ -212,11 +212,12 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 		}
 		vmnet = n
 		rs.Net = &runspec.NetConfig{
-			Interface:  runspec.MMDSInterface,
-			Address:    vmnet.VMIP.String(),
-			PrefixLen:  vmnet.PrefixLen,
-			Gateway:    vmnet.GatewayIP.String(),
-			GatewayMAC: vmnet.GatewayMAC.String(),
+			Interface:   runspec.MMDSInterface,
+			Address:     vmnet.VMIP.String(),
+			PrefixLen:   vmnet.PrefixLen,
+			Gateway:     vmnet.GatewayIP.String(),
+			GatewayMAC:  vmnet.GatewayMAC.String(),
+			Nameservers: r.cfg.GuestDNS,
 		}
 	}
 

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -112,6 +113,10 @@ type FirecrackerConfig struct {
 	// GatewayIP is the shared virtual gateway VMs route through; must fall inside
 	// VMSubnet. Empty defaults to the subnet's first usable host.
 	GatewayIP string
+	// GuestDNS are the resolvers written into each guest's /etc/resolv.conf so
+	// workloads can resolve names over the egress NAT. Driver default when empty.
+	// Only used when UplinkDevice is set.
+	GuestDNS []string
 	// HostPortMin / HostPortMax bound the public host-port pool DNAT'd to in-VM
 	// services (driver defaults when zero). Only used when UplinkDevice is set.
 	HostPortMin int
@@ -192,6 +197,7 @@ func Load() *Config {
 				UplinkDevice:     getEnv("FC_UPLINK", ""),
 				VMSubnet:         getEnv("FC_VM_SUBNET", ""),
 				GatewayIP:        getEnv("FC_GATEWAY_IP", ""),
+				GuestDNS:         getCSVEnv("FC_GUEST_DNS", nil),
 				HostPortMin:      getIntEnv("FC_HOST_PORT_MIN", 0),
 				HostPortMax:      getIntEnv("FC_HOST_PORT_MAX", 0),
 				WorldPersistence: getBoolEnv("FC_WORLD_PERSIST", false),
@@ -236,6 +242,22 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getCSVEnv reads a comma-separated list, trimming whitespace and dropping
+// empty fields. Returns nil (not the fallback) only when the key is unset.
+func getCSVEnv(key string, fallback []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getIntEnv(key string, fallback int) int {
