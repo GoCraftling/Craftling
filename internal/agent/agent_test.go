@@ -214,10 +214,26 @@ func TestExecOpDispatch(t *testing.T) {
 		t.Errorf("status after stop = %q, want stopped", stopped.State)
 	}
 
+	// Logs returns the VM's console output as the raw result payload (not a VM).
+	logsReq, _ := json.Marshal(LogsRequest{VMID: vm.ID})
+	logsPayload, errStr := execOp(ctx, rt, &pb.Command{Op: OpLogs, Payload: logsReq})
+	if errStr != "" {
+		t.Fatalf("logs op error = %q, want none", errStr)
+	}
+	if len(logsPayload) == 0 {
+		t.Error("logs op returned empty payload, want console output")
+	}
+
 	// Starting a VM the runtime does not know surfaces an error string.
 	ghost, _ := json.Marshal(VMRef{VMID: "vm-ghost"})
 	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpStart, Payload: ghost}); errStr == "" {
 		t.Error("start unknown vm: expected error string, got none")
+	}
+
+	// Logs for a VM the runtime does not know surfaces an error string.
+	ghostLogs, _ := json.Marshal(LogsRequest{VMID: "vm-ghost"})
+	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpLogs, Payload: ghostLogs}); errStr == "" {
+		t.Error("logs unknown vm: expected error string, got none")
 	}
 
 	// An unrecognized op is reported, not fatal.

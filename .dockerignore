@@ -9,3 +9,5 @@ Dockerfile
 .idea/
 .vscode/
 .DS_Store
+fc-assets/work/
+fc-assets/images/

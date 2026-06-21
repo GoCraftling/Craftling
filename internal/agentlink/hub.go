@@ -240,10 +240,39 @@ func (h *Hub) Status(ctx context.Context, hostID, vmID string) (*agent.VM, error
 	return h.call(ctx, hostID, agent.OpStatus, agent.VMRef{VMID: vmID})
 }
 
+// Logs fetches a VM's captured console/VMM output from the host's agent,
+// returning the raw log bytes (the last tailLines lines when tailLines > 0, all
+// of it otherwise).
+func (h *Hub) Logs(ctx context.Context, hostID, vmID string, tailLines int) ([]byte, error) {
+	return h.callRaw(ctx, hostID, agent.OpLogs, agent.LogsRequest{VMID: vmID, TailLines: tailLines})
+}
+
 // call sends one command down the host's stream and blocks for the correlated
 // reply (or until ctx is done). It returns the decoded VM when the op yields
 // one, a nil VM for ops that don't, or an error from the agent or transport.
 func (h *Hub) call(ctx context.Context, hostID, op string, reqPayload any) (*agent.VM, error) {
+	payload, err := h.callRaw(ctx, hostID, op, reqPayload)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	var vm agent.VM
+	if err := json.Unmarshal(payload, &vm); err != nil {
+		return nil, fmt.Errorf("decode %s result: %w", op, err)
+	}
+	if vm.ID == "" {
+		return nil, nil
+	}
+	return &vm, nil
+}
+
+// callRaw sends one command down the host's stream and blocks for the
+// correlated reply (or until ctx is done), returning the result payload bytes
+// verbatim. It is the shared transport under call (which decodes the payload
+// into a VM) and the raw-payload ops like logs.
+func (h *Hub) callRaw(ctx context.Context, hostID, op string, reqPayload any) ([]byte, error) {
 	c := h.get(hostID)
 	if c == nil {
 		return nil, ErrHostNotConnected
@@ -270,16 +299,6 @@ func (h *Hub) call(ctx context.Context, hostID, op string, reqPayload any) (*age
 		if res.Error != "" {
 			return nil, fmt.Errorf("agent %s: %s", op, res.Error)
 		}
-		if len(res.Payload) == 0 {
-			return nil, nil
-		}
-		var vm agent.VM
-		if err := json.Unmarshal(res.Payload, &vm); err != nil {
-			return nil, fmt.Errorf("decode %s result: %w", op, err)
-		}
-		if vm.ID == "" {
-			return nil, nil
-		}
-		return &vm, nil
+		return res.Payload, nil
 	}
 }

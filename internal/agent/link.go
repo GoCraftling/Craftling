@@ -24,6 +24,7 @@ const (
 	OpEvict       = "evict"
 	OpDeprovision = "deprovision"
 	OpStatus      = "status"
+	OpLogs        = "logs"
 )
 
 // VMRef is the JSON payload for the ops that act on an existing VM by id
@@ -31,6 +32,14 @@ const (
 // it; the agent link decodes it.
 type VMRef struct {
 	VMID string `json:"vm_id"`
+}
+
+// LogsRequest is the JSON payload for OpLogs: the VM to read plus how many
+// trailing lines to return (0 = all). The Result payload is the raw log bytes,
+// not a JSON-encoded VM.
+type LogsRequest struct {
+	VMID      string `json:"vm_id"`
+	TailLines int    `json:"tail_lines"`
 }
 
 // LinkInfo is what the agent announces about itself when it opens the stream.
@@ -176,6 +185,15 @@ func execOp(ctx context.Context, rt Runtime, cmd *pb.Command) (payload []byte, e
 	case OpStatus:
 		vm, err := rt.Status(ctx, vmRef(cmd))
 		return marshalVM(vm), errString(err)
+	case OpLogs:
+		var req LogsRequest
+		if err := json.Unmarshal(cmd.Payload, &req); err != nil {
+			return nil, "decode logs request: " + err.Error()
+		}
+		// The result payload is the raw log bytes; the hub returns them verbatim
+		// rather than decoding a VM.
+		out, err := rt.Logs(ctx, req.VMID, req.TailLines)
+		return out, errString(err)
 	default:
 		return nil, "unknown op " + cmd.Op
 	}

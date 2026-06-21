@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 
+	"github.com/aarani/craftling-go/internal/agentlink"
 	"github.com/aarani/craftling-go/internal/logger"
 	"github.com/aarani/craftling-go/internal/middleware"
 	"github.com/aarani/craftling-go/internal/model"
@@ -28,17 +30,26 @@ type TemplateResolver interface {
 	ManifestParsed(ctx context.Context, id string) (*registry.Manifest, error)
 }
 
+// LogProvider fetches a server's captured console output from its backing VM.
+// *provisioner.RemoteProvisioner satisfies it (and provisioner.Fake in tests);
+// both the owner and admin log endpoints read through it.
+type LogProvider interface {
+	Logs(ctx context.Context, s *model.GameServer, tailLines int) ([]byte, error)
+}
+
 // ServerHandler serves the game-server CRUD endpoints.
 type ServerHandler struct {
 	servers   *repository.GameServerRepository
 	sched     *scheduler.Scheduler
 	templates TemplateResolver
+	logs      LogProvider
 }
 
 // NewServerHandler constructs a ServerHandler. templates may be nil only if the
-// template-launch path is never exercised.
-func NewServerHandler(servers *repository.GameServerRepository, sched *scheduler.Scheduler, templates TemplateResolver) *ServerHandler {
-	return &ServerHandler{servers: servers, sched: sched, templates: templates}
+// template-launch path is never exercised; logs may be nil only if the logs
+// endpoint is never exercised.
+func NewServerHandler(servers *repository.GameServerRepository, sched *scheduler.Scheduler, templates TemplateResolver, logs LogProvider) *ServerHandler {
+	return &ServerHandler{servers: servers, sched: sched, templates: templates, logs: logs}
 }
 
 // createServerRequest is the create payload. A request takes one of two shapes:
@@ -176,6 +187,63 @@ func (h *ServerHandler) Get(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, s)
+}
+
+// Logs returns the captured console output of an owned server's backing VM.
+func (h *ServerHandler) Logs(c *gin.Context) {
+	s, ok := h.ownedOr404(c)
+	if !ok {
+		return
+	}
+	writeLogs(c, h.logs, s)
+}
+
+// defaultLogTailLines / maxLogTailLines bound how many trailing log lines a
+// request returns, keeping the response payload bounded even for a long-running
+// server. A caller narrows it with ?tail=N; values above the cap are clamped.
+const (
+	defaultLogTailLines = 1000
+	maxLogTailLines     = 5000
+)
+
+// writeLogs fetches a server's logs through the provider and writes the JSON
+// response, shared by the owner and admin endpoints. It maps an unreachable
+// host to 503 (transient) and anything else to 500.
+func writeLogs(c *gin.Context, provider LogProvider, s *model.GameServer) {
+	if provider == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "logs are not available"})
+		return
+	}
+	tail := logTailParam(c)
+	out, err := provider.Logs(c.Request.Context(), s, tail)
+	if err != nil {
+		if errors.Is(err, agentlink.ErrHostNotConnected) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "the server's host is not currently reachable"})
+			return
+		}
+		logger.FromContext(c).Error("get server logs", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"server_id": s.ID, "logs": string(out)})
+}
+
+// logTailParam reads the ?tail=N query, defaulting to defaultLogTailLines and
+// clamping into (0, maxLogTailLines]. A non-positive or unparseable value falls
+// back to the default rather than requesting the unbounded log.
+func logTailParam(c *gin.Context) int {
+	raw := c.Query("tail")
+	if raw == "" {
+		return defaultLogTailLines
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultLogTailLines
+	}
+	if n > maxLogTailLines {
+		return maxLogTailLines
+	}
+	return n
 }
 
 // Update edits the spec and/or desired state of an owned server.

@@ -19,7 +19,7 @@ import (
 // NewRouter builds the Gin engine with middleware and routes wired up. The host
 // inventory is passed in (rather than built here) so the host reaper can share
 // the same in-memory store.
-func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo *repository.HostRepository) *gin.Engine {
+func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo *repository.HostRepository, logs LogProvider) *gin.Engine {
 	if cfg.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -29,13 +29,13 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 	refreshRepo := repository.NewRefreshTokenRepository(pool)
 	gameServerRepo := repository.NewGameServerRepository(pool)
 	authHandler := NewAuthHandler(userRepo, refreshRepo, jwtManager, cfg.RefreshTTL)
-	adminHandler := NewAdminHandler(userRepo, gameServerRepo, hostRepo)
+	adminHandler := NewAdminHandler(userRepo, gameServerRepo, hostRepo, logs)
 	// One registry client backs both the template browse endpoints and the
 	// server-side template resolution the create handler performs.
 	registryClient := registry.New(cfg.TemplateIndexURL, &http.Client{Timeout: 10 * time.Second})
 	// The scheduler is stateless over the shared in-memory host inventory, so the
 	// handler builds its own; the reconciler builds another over the same store.
-	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo), registryClient)
+	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo), registryClient, logs)
 	templateHandler := NewTemplateHandler(registryClient)
 
 	r := gin.New()
@@ -67,6 +67,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 			servers.POST("", serverHandler.Create)
 			servers.GET("", serverHandler.List)
 			servers.GET("/:id", serverHandler.Get)
+			servers.GET("/:id/logs", serverHandler.Logs)
 			servers.PATCH("/:id", serverHandler.Update)
 			servers.POST("/:id/snapshot", serverHandler.RequestBackup)
 			servers.DELETE("/:id", serverHandler.Delete)
@@ -86,6 +87,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 		{
 			admin.GET("/users", adminHandler.ListUsers)
 			admin.GET("/servers", adminHandler.ListServers)
+			admin.GET("/servers/:id/logs", adminHandler.ServerLogs)
 			admin.GET("/hosts", adminHandler.ListHosts)
 		}
 

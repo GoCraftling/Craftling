@@ -175,6 +175,35 @@ func TestLifecycleIdempotencyNoProcess(t *testing.T) {
 	if vm.State != agent.StateMissing {
 		t.Errorf("status unknown state = %q, want missing", vm.State)
 	}
+	// Logs distinguishes a missing VM from an empty one: it errors rather than
+	// returning empty output (Status returns "missing" instead, by contract).
+	if _, err := rt.Logs(ctx, "ghost", 0); !errors.Is(err, agent.ErrVMNotFound) {
+		t.Errorf("logs unknown = %v, want ErrVMNotFound", err)
+	}
+}
+
+func TestTailBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		n    int
+		want string
+	}{
+		{"all when n<=0", "a\nb\nc\n", 0, "a\nb\nc\n"},
+		{"last two lines", "a\nb\nc\n", 2, "b\nc\n"},
+		{"last one line", "a\nb\nc\n", 1, "c\n"},
+		{"n exceeds lines", "a\nb\n", 9, "a\nb\n"},
+		{"no trailing newline", "a\nb\nc", 2, "b\nc"},
+		{"single line", "only\n", 1, "only\n"},
+		{"empty", "", 5, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(tailBytes([]byte(tc.in), tc.n)); got != tc.want {
+				t.Errorf("tailBytes(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestProvisionRejectsInvalidSpec(t *testing.T) {

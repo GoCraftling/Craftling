@@ -56,6 +56,10 @@ type Provisioner interface {
 	// running server into the durable store (P5). A no-op when the server has
 	// no backing VM (nothing live to capture).
 	Snapshot(ctx context.Context, s *model.GameServer) error
+	// Logs returns the server's captured console output from its backing VM (the
+	// last tailLines lines when tailLines > 0, all of it otherwise). A server
+	// with no backing VM has no logs, so it returns empty output and no error.
+	Logs(ctx context.Context, s *model.GameServer, tailLines int) ([]byte, error)
 }
 
 // defaultMinecraftPort is the standard Minecraft server port.
@@ -105,6 +109,16 @@ func (Fake) Deprovision(_ context.Context, _ *model.GameServer) error { return n
 
 // Snapshot is a no-op for the fake backend; there is no real world to capture.
 func (Fake) Snapshot(_ context.Context, _ *model.GameServer) error { return nil }
+
+// Logs returns synthetic console output for a server with a backing VM, or
+// empty output for one that was never provisioned, so the logs path can be
+// exercised against the fake backend.
+func (Fake) Logs(_ context.Context, s *model.GameServer, _ int) ([]byte, error) {
+	if s.VMID == nil || *s.VMID == "" {
+		return nil, nil
+	}
+	return []byte("[fake] logs for server " + s.ID + " (vm " + *s.VMID + ")\n"), nil
+}
 
 // Status infers state from the server's recorded VM id, since the fake holds no
 // real backend state: a server with a VM is running, otherwise it is missing.

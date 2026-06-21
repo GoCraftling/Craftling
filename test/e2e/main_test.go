@@ -109,14 +109,17 @@ func TestMain(m *testing.M) {
 	hostRepo = repository.NewHostRepository()
 	gameServerRepo := repository.NewGameServerRepository(pool)
 
-	srv := httptest.NewServer(handler.NewRouter(cfg, zap.NewNop(), pool, hostRepo))
-	baseURL = srv.URL
-
 	// The hub is the control plane's end of the persistent agent connection:
 	// agents dial this gRPC listener and hold a stream open, and the hub registers
 	// hosts and pushes VM commands down the stream. This is the real P3 seam,
-	// replacing the old outbound HTTP client the control plane used to dial.
+	// replacing the old outbound HTTP client the control plane used to dial. The
+	// remote provisioner over it backs both the reconciler and the log endpoint.
 	hub := agentlink.NewHub(hostRepo, gameServerRepo, zap.NewNop())
+	prov := provisioner.NewRemote(hub)
+
+	srv := httptest.NewServer(handler.NewRouter(cfg, zap.NewNop(), pool, hostRepo, prov))
+	baseURL = srv.URL
+
 	grpcSrv := grpc.NewServer()
 	pb.RegisterAgentLinkServer(grpcSrv, hub)
 	grpcLis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -132,7 +135,6 @@ func TestMain(m *testing.M) {
 	// the hub (the control plane never touches a runtime directly).
 	recCtx, recCancel := context.WithCancel(ctx)
 	sched := scheduler.New(hostRepo)
-	prov := provisioner.NewRemote(hub)
 	rec := reconciler.New(gameServerRepo, prov, sched, 30*time.Second, zap.NewNop())
 	go rec.Run(recCtx, 100*time.Millisecond)
 

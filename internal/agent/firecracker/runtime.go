@@ -477,6 +477,52 @@ func (r *Runtime) Snapshot(ctx context.Context, vmID string) error {
 	return r.snapshotRunning(ctx, m)
 }
 
+// Logs returns the VM's captured console/VMM output, read from its per-VM
+// firecracker.log (which carries the guest serial console — kernel messages and
+// the workload's own stdout/stderr — thanks to console=ttyS0). When tailLines >
+// 0 only the last that many lines are returned. ErrVMNotFound for an unknown id.
+// A not-yet-booted VM with no log file yet yields empty output, not an error.
+func (r *Runtime) Logs(_ context.Context, vmID string, tailLines int) ([]byte, error) {
+	r.mu.Lock()
+	m, ok := r.vms[vmID]
+	r.mu.Unlock()
+	if !ok {
+		return nil, agent.ErrVMNotFound
+	}
+	data, err := os.ReadFile(filepath.Join(m.dir, logFileName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("firecracker: read vm log: %w", err)
+	}
+	return tailBytes(data, tailLines), nil
+}
+
+// tailBytes returns the last n lines of b (newline-delimited), or all of b when
+// n <= 0. It counts the trailing newline's empty segment as no extra line, so a
+// log ending in "\n" tails the lines a human would count.
+func tailBytes(b []byte, n int) []byte {
+	if n <= 0 || len(b) == 0 {
+		return b
+	}
+	// Walk backwards over n line boundaries, skipping a single trailing newline.
+	end := len(b)
+	if b[end-1] == '\n' {
+		end--
+	}
+	count := 0
+	for i := end - 1; i >= 0; i-- {
+		if b[i] == '\n' {
+			count++
+			if count == n {
+				return b[i+1:]
+			}
+		}
+	}
+	return b
+}
+
 // releaseNet returns a VM's address/port to the IPAM pool. No-op when the
 // dataplane is disabled or the vmNet is empty.
 func (r *Runtime) releaseNet(n vmNet) {
