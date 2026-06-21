@@ -28,13 +28,28 @@ type Meter interface {
 	StopRunning(ctx context.Context, serverID string) error
 }
 
+// WhitelistSource yields a server's desired in-game whitelist: the usernames of
+// the players its owner granted onto it. The reconciler periodically feeds this
+// to each running server over RCON. *repository.PlayerRepository satisfies it.
+// Optional: a nil source disables whitelist sync.
+type WhitelistSource interface {
+	UsernamesForServer(ctx context.Context, serverID string) ([]string, error)
+}
+
+// whitelistSyncInterval is how often the reconciler re-feeds every running
+// server's whitelist. The guest reconciles to the exact set (a steady-state push
+// is just one "whitelist list" read), so re-pushing on an interval is cheap and
+// covers both grant changes and freshly started servers without a change feed.
+const whitelistSyncInterval = 30 * time.Second
+
 // Reconciler periodically converges game servers toward their desired state.
 type Reconciler struct {
-	servers *repository.GameServerRepository
-	prov    provisioner.Provisioner
-	sched   *scheduler.Scheduler
-	meter   Meter
-	log     *zap.Logger
+	servers   *repository.GameServerRepository
+	prov      provisioner.Provisioner
+	sched     *scheduler.Scheduler
+	meter     Meter
+	whitelist WhitelistSource
+	log       *zap.Logger
 	// hostDeadAfter is how long a running server's host may stay unreachable
 	// before the reconciler presumes the VM dead and reschedules. It must exceed
 	// the heartbeat TTL so a brief agent restart isn't mistaken for a loss.
@@ -43,9 +58,10 @@ type Reconciler struct {
 
 // New constructs a Reconciler. hostDeadAfter is the grace a running server's host
 // gets to come back before its VM is presumed dead (see Reconciler.hostDeadAfter).
-// meter may be nil to disable billing metering.
-func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, hostDeadAfter time.Duration, log *zap.Logger) *Reconciler {
-	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, hostDeadAfter: hostDeadAfter, log: log}
+// meter may be nil to disable billing metering; whitelist may be nil to disable
+// in-game whitelist sync.
+func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, whitelist WhitelistSource, hostDeadAfter time.Duration, log *zap.Logger) *Reconciler {
+	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, whitelist: whitelist, hostDeadAfter: hostDeadAfter, log: log}
 }
 
 // startBilling opens a server's metered running interval (best-effort: a billing
@@ -69,8 +85,14 @@ func (r *Reconciler) stopBilling(ctx context.Context, serverID string) {
 	}
 }
 
-// Run reconciles on each tick until ctx is cancelled.
+// Run reconciles on each tick until ctx is cancelled. It also runs a slower,
+// independent loop that feeds each running server's in-game whitelist over RCON,
+// so player-grant changes converge without burdening the fast desired-state tick.
 func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
+	if r.whitelist != nil {
+		go r.runWhitelistSync(ctx, whitelistSyncInterval)
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -80,6 +102,45 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			r.ReconcileOnce(ctx)
+		}
+	}
+}
+
+// runWhitelistSync periodically pushes every running server's desired whitelist
+// to its host. It is decoupled from the desired-state loop: a slow or unreachable
+// host only delays its own whitelist, never the core reconcile.
+func (r *Reconciler) runWhitelistSync(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.syncWhitelists(ctx)
+		}
+	}
+}
+
+// syncWhitelists feeds each running server's granted-player set to its workload
+// over RCON. Failures are logged, not fatal — a host that is unreachable or not
+// RCON-capable (the fake runtime, or a server without RCON configured) simply
+// keeps its current whitelist until the next sweep.
+func (r *Reconciler) syncWhitelists(ctx context.Context) {
+	servers, err := r.servers.ListRunning(ctx)
+	if err != nil {
+		r.log.Error("whitelist sync: list running servers", zap.Error(err))
+		return
+	}
+	for i := range servers {
+		s := &servers[i]
+		names, err := r.whitelist.UsernamesForServer(ctx, s.ID)
+		if err != nil {
+			r.log.Warn("whitelist sync: load grants", zap.String("id", s.ID), zap.Error(err))
+			continue
+		}
+		if err := r.prov.SyncWhitelist(ctx, s, names); err != nil {
+			r.log.Debug("whitelist sync: push", zap.String("id", s.ID), zap.Error(err))
 		}
 	}
 }

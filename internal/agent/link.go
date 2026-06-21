@@ -25,6 +25,7 @@ const (
 	OpDeprovision = "deprovision"
 	OpStatus      = "status"
 	OpLogs        = "logs"
+	OpWhitelist   = "whitelist"
 )
 
 // VMRef is the JSON payload for the ops that act on an existing VM by id
@@ -40,6 +41,13 @@ type VMRef struct {
 type LogsRequest struct {
 	VMID      string `json:"vm_id"`
 	TailLines int    `json:"tail_lines"`
+}
+
+// WhitelistRequest is the JSON payload for OpWhitelist: the VM whose workload
+// whitelist to reconcile and the desired set of usernames. The op returns no VM.
+type WhitelistRequest struct {
+	VMID      string   `json:"vm_id"`
+	Usernames []string `json:"usernames"`
 }
 
 // LinkInfo is what the agent announces about itself when it opens the stream.
@@ -178,6 +186,12 @@ func execOp(ctx context.Context, rt Runtime, cmd *pb.Command) (payload []byte, e
 		return nil, errString(rt.Stop(ctx, vmRef(cmd)))
 	case OpSnapshot:
 		return nil, errString(rt.Snapshot(ctx, vmRef(cmd)))
+	case OpWhitelist:
+		var req WhitelistRequest
+		if err := json.Unmarshal(cmd.Payload, &req); err != nil {
+			return nil, "decode whitelist request: " + err.Error()
+		}
+		return nil, errString(rt.SyncWhitelist(ctx, req.VMID, req.Usernames))
 	case OpEvict:
 		return nil, errString(rt.Evict(ctx, vmRef(cmd)))
 	case OpDeprovision:

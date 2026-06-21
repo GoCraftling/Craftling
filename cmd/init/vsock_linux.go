@@ -101,8 +101,10 @@ func handleSnapshotConn(logger *zap.Logger, conn *os.File, q *runspec.QuiesceCon
 
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
-		cmd := strings.TrimSpace(scanner.Text())
-		switch cmd {
+		// A command is a verb optionally followed by a single-line argument
+		// (WHITELIST carries a JSON array; the others carry nothing).
+		verb, arg, _ := strings.Cut(strings.TrimSpace(scanner.Text()), " ")
+		switch verb {
 		case runspec.SnapPrepare:
 			if freezeFd >= 0 {
 				reply(conn, runspec.SnapErrPrefix+"already prepared")
@@ -134,10 +136,48 @@ func handleSnapshotConn(logger *zap.Logger, conn *os.File, q *runspec.QuiesceCon
 			}
 			reply(conn, runspec.SnapOK+" "+string(raw))
 
+		case runspec.WhitelistApply:
+			if err := applyWhitelist(logger, q, arg); err != nil {
+				reply(conn, runspec.SnapErrPrefix+err.Error())
+				continue
+			}
+			reply(conn, runspec.SnapOK)
+
 		default:
 			reply(conn, runspec.SnapErrPrefix+"unknown command")
 		}
 	}
+}
+
+// applyWhitelist reconciles the workload's whitelist to the desired set of
+// usernames carried as a JSON array in arg. It reads the live whitelist over
+// RCON, applies the minimal add/remove diff, and toggles enforcement (on when
+// the set is non-empty, off when empty) — so the platform owns the whitelist
+// while a server with no granted players stays open. RCON is required; without
+// it there is no way to reach the workload, so it returns an error.
+func applyWhitelist(logger *zap.Logger, q *runspec.QuiesceConfig, arg string) error {
+	if q == nil || q.RCONAddress == "" {
+		return fmt.Errorf("rcon not configured; cannot apply whitelist")
+	}
+	var desired []string
+	if err := json.Unmarshal([]byte(arg), &desired); err != nil {
+		return fmt.Errorf("decode whitelist: %w", err)
+	}
+
+	var current []string
+	if bodies, err := minecraft.RCONExec(q.RCONAddress, healthProbeTimeout, "whitelist list"); err != nil {
+		return fmt.Errorf("read whitelist: %w", err)
+	} else if len(bodies) > 0 {
+		current = minecraft.ParseWhitelist(bodies[0])
+	}
+
+	cmds := minecraft.WhitelistSyncCommands(current, desired)
+	if _, err := minecraft.RCONExec(q.RCONAddress, healthProbeTimeout, cmds...); err != nil {
+		return fmt.Errorf("apply whitelist: %w", err)
+	}
+	logger.Info("init: whitelist reconciled",
+		zap.Int("desired", len(desired)), zap.Int("commands", len(cmds)))
+	return nil
 }
 
 // prepareSnapshot flushes the workload (best-effort RCON) and freezes the

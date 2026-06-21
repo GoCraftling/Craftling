@@ -224,6 +224,17 @@ func TestExecOpDispatch(t *testing.T) {
 		t.Error("logs op returned empty payload, want console output")
 	}
 
+	// Whitelist sync dispatches to the runtime for a known VM (the fake applies it
+	// as a no-op), and surfaces an error for an unknown one.
+	wl, _ := json.Marshal(WhitelistRequest{VMID: vm.ID, Usernames: []string{"alice", "bob"}})
+	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpWhitelist, Payload: wl}); errStr != "" {
+		t.Fatalf("whitelist op error = %q, want none", errStr)
+	}
+	ghostWL, _ := json.Marshal(WhitelistRequest{VMID: "vm-ghost", Usernames: []string{"alice"}})
+	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpWhitelist, Payload: ghostWL}); errStr == "" {
+		t.Error("whitelist unknown vm: expected error string, got none")
+	}
+
 	// Starting a VM the runtime does not know surfaces an error string.
 	ghost, _ := json.Marshal(VMRef{VMID: "vm-ghost"})
 	if _, errStr := execOp(ctx, rt, &pb.Command{Op: OpStart, Payload: ghost}); errStr == "" {

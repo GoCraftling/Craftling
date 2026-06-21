@@ -111,6 +111,10 @@ type Runtime interface {
 	// world into the durable store (P5c), on demand. ErrVMNotFound for an
 	// unknown id; an error if the runtime has no world store configured.
 	Snapshot(ctx context.Context, vmID string) error
+	// SyncWhitelist reconciles a running VM's workload whitelist to the given set
+	// of usernames over RCON. ErrVMNotFound for an unknown id; an error when the
+	// VM has no control channel or RCON is unavailable. Idempotent.
+	SyncWhitelist(ctx context.Context, vmID string, usernames []string) error
 	// Logs returns the VM's captured console/VMM output, most recent last. When
 	// tailLines > 0 only the last that many lines are returned; <= 0 returns all
 	// available output. ErrVMNotFound for an unknown id.
@@ -307,6 +311,18 @@ func (r *FakeRuntime) Status(_ context.Context, vmID string) (*VM, error) {
 // capture. It reports ErrVMNotFound for an unknown id so callers can still tell
 // a known VM from a missing one.
 func (r *FakeRuntime) Snapshot(_ context.Context, vmID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.vms[vmID]; !ok {
+		return ErrVMNotFound
+	}
+	return nil
+}
+
+// SyncWhitelist is a no-op for the fake runtime — it runs no real workload to
+// push a whitelist to. ErrVMNotFound for an unknown id so callers can still tell
+// a known VM from a missing one.
+func (r *FakeRuntime) SyncWhitelist(_ context.Context, vmID string, _ []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.vms[vmID]; !ok {

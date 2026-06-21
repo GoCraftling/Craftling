@@ -24,6 +24,7 @@ type Commander interface {
 	Start(ctx context.Context, hostID, vmID string) (*agent.VM, error)
 	Stop(ctx context.Context, hostID, vmID string) error
 	Snapshot(ctx context.Context, hostID, vmID string) error
+	SyncWhitelist(ctx context.Context, hostID, vmID string, usernames []string) error
 	Evict(ctx context.Context, hostID, vmID string) error
 	Deprovision(ctx context.Context, hostID, vmID string) error
 	Status(ctx context.Context, hostID, vmID string) (*agent.VM, error)
@@ -154,6 +155,20 @@ func (p *RemoteProvisioner) Snapshot(ctx context.Context, s *model.GameServer) e
 		return err
 	}
 	return p.cmd.Snapshot(ctx, hostID, *s.VMID)
+}
+
+// SyncWhitelist asks the assigned host's agent to reconcile the server's in-game
+// whitelist to usernames over RCON. A server with no backing VM has nothing
+// running to push to, so it is a no-op.
+func (p *RemoteProvisioner) SyncWhitelist(ctx context.Context, s *model.GameServer, usernames []string) error {
+	if s.VMID == nil || *s.VMID == "" {
+		return nil
+	}
+	hostID, err := assignedHost(s)
+	if err != nil {
+		return err
+	}
+	return p.cmd.SyncWhitelist(ctx, hostID, *s.VMID, usernames)
 }
 
 // Logs asks the assigned host's agent for the server's captured console output.

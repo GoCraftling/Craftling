@@ -126,6 +126,31 @@ func (r *PlayerRepository) Update(ctx context.Context, id, username string, serv
 	return tx.Commit(ctx)
 }
 
+// UsernamesForServer returns the usernames of every player granted onto a
+// server — the server's desired whitelist. Ordered for a stable result. The
+// reconciler reads it to feed the in-game whitelist over RCON.
+func (r *PlayerRepository) UsernamesForServer(ctx context.Context, serverID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT p.username
+		FROM player_servers ps
+		JOIN players p ON p.id = ps.player_id
+		WHERE ps.server_id = $1
+		ORDER BY p.username`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
 // Delete removes a player; its grants cascade.
 func (r *PlayerRepository) Delete(ctx context.Context, id string) error {
 	_, err := r.pool.Exec(ctx, `DELETE FROM players WHERE id = $1`, id)

@@ -55,7 +55,9 @@ A third binary, **`cmd/init`**, is the in-guest PID 1 baked into every rootfs.
   (register/login/refresh/logout/me), owner-scoped servers (CRUD +
   `POST /servers/:id/snapshot`), owner-scoped players/whitelist
   (`/players` CRUD — a roster of usernames each granted onto a checkable subset
-  of the owner's servers), templates (list/get), quotas + billing
+  of the owner's servers; the reconciler feeds each running server's set into the
+  live workload over RCON through the vsock control channel, so the platform owns
+  the in-game whitelist), templates (list/get), quotas + billing
   (`/quota`, `/billing`, admin `/admin/users/:id/{quota,billing}`), admin
   (users/servers/hosts), `healthz`/`ping`. Agents are **not** on the HTTP API:
   they connect over the gRPC `AgentLink` stream (`internal/agentlink`, separate

@@ -3,9 +3,13 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"testing"
+
+	"github.com/aarani/craftling-go/internal/repository"
 )
 
 type playerPayload struct {
@@ -106,6 +110,36 @@ func TestPlayerRosterAndGrants(t *testing.T) {
 	}
 	if players := listPlayers(t, tok); len(players) != 0 {
 		t.Fatalf("roster after delete = %+v, want empty", players)
+	}
+}
+
+// TestWhitelistUsernamesForServer verifies the data source the reconciler feeds
+// to RCON: a server's desired whitelist is exactly the granted players'
+// usernames, ordered, and reflects grant changes. (The RCON application itself
+// is unit-tested in internal/minecraft and exercised under the KVM lane; here we
+// pin the control-plane query the sync loop reads.)
+func TestWhitelistUsernamesForServer(t *testing.T) {
+	user := registerUser(t, "wl-owner@example.com", "hunter2pass")
+	tok := user.AccessToken
+	srv := createServerID(t, tok, "wl-world")
+
+	// Grant two players onto the server.
+	for _, name := range []string{"Bravo", "Alpha"} {
+		resp, body := doJSON(t, http.MethodPost, "/api/v1/players", tok, map[string]any{
+			"username": name, "server_ids": []string{srv},
+		})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %s status = %d, body = %s", name, resp.StatusCode, body)
+		}
+	}
+
+	repo := repository.NewPlayerRepository(pool)
+	got, err := repo.UsernamesForServer(context.Background(), srv)
+	if err != nil {
+		t.Fatalf("usernames for server: %v", err)
+	}
+	if want := []string{"Alpha", "Bravo"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("whitelist = %v, want %v (sorted)", got, want)
 	}
 }
 

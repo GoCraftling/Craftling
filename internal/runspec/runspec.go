@@ -198,6 +198,13 @@ const (
 	// configured, an authenticated "list" — so the host never needs network reach
 	// into the VM.
 	HealthProbe = "HEALTH"
+	// WhitelistApply asks the guest to reconcile the workload's whitelist to a
+	// desired set of usernames, sent as a JSON array after the verb:
+	// "WHITELIST [\"alice\",\"bob\"]". The guest diffs it against the live
+	// whitelist (read over RCON) and applies the minimal add/remove plus an
+	// on/off toggle, replying "OK" or "ERR <message>". It needs RCON configured;
+	// without it the guest answers ERR.
+	WhitelistApply = "WHITELIST"
 )
 
 // Health is the deep-health of the workload inside a running VM (P7): proof the

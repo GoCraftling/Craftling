@@ -222,6 +222,13 @@ func (h *Hub) Snapshot(ctx context.Context, hostID, vmID string) error {
 	return err
 }
 
+// SyncWhitelist asks the host's agent to reconcile a VM's workload whitelist to
+// the given usernames over RCON.
+func (h *Hub) SyncWhitelist(ctx context.Context, hostID, vmID string, usernames []string) error {
+	_, err := h.callRaw(ctx, hostID, agent.OpWhitelist, agent.WhitelistRequest{VMID: vmID, Usernames: usernames})
+	return err
+}
+
 // Evict asks the host's agent to tear down a VM while preserving its durable
 // world, releasing the host so the server can be rescheduled elsewhere.
 func (h *Hub) Evict(ctx context.Context, hostID, vmID string) error {
