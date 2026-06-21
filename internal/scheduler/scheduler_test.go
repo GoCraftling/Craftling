@@ -156,6 +156,32 @@ func TestCanEverFit(t *testing.T) {
 	}
 }
 
+// TestPlaceable verifies the stale-assignment check the reconciler relies on to
+// rescue a server placed on a host that later vanished: a ready host is
+// placeable; an unknown id (the host's agent reconnected under a fresh id) and a
+// downed host are both not.
+func TestPlaceable(t *testing.T) {
+	ctx := context.Background()
+	repo := repository.NewHostRepository()
+	id := registerHost(t, repo, "live", 8, 8192)
+	s := New(repo)
+
+	if ok, err := s.Placeable(ctx, id); err != nil || !ok {
+		t.Fatalf("ready host: ok=%v err=%v, want true", ok, err)
+	}
+	if ok, err := s.Placeable(ctx, "never-registered"); err != nil || ok {
+		t.Fatalf("unknown host: ok=%v err=%v, want false", ok, err)
+	}
+
+	// Down the host (sweep with a far-future cutoff); it must stop being placeable.
+	if _, err := repo.MarkStale(ctx, futureTime()); err != nil {
+		t.Fatalf("mark stale: %v", err)
+	}
+	if ok, err := s.Placeable(ctx, id); err != nil || ok {
+		t.Fatalf("downed host: ok=%v err=%v, want false", ok, err)
+	}
+}
+
 // TestScheduleConcurrent verifies reservation is atomic under contention: with
 // room for exactly 5 servers, 20 concurrent schedules grant exactly 5.
 func TestScheduleConcurrent(t *testing.T) {

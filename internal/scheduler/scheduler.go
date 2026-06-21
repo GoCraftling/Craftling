@@ -68,6 +68,24 @@ func (s *Scheduler) Release(ctx context.Context, hostID string, cpus, memMB int)
 	return s.hosts.Release(ctx, hostID, cpus, memMB)
 }
 
+// Placeable reports whether the given host is currently a ready placement target.
+// The reconciler uses it to detect a stale assignment: a server placed on a host
+// that has since gone down — or whose agent reconnected under a new host id,
+// leaving the old id behind — should release that assignment and re-schedule,
+// rather than retry a host that can no longer accept work forever.
+func (s *Scheduler) Placeable(ctx context.Context, hostID string) (bool, error) {
+	ready, err := s.hosts.ListReady(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, h := range ready {
+		if h.ID == hostID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // CanEverFit reports whether any known host has enough *total* capacity to ever
 // run this spec, regardless of current load or liveness. It backs create-time
 // validation: a spec larger than the biggest host can never be placed, so it is

@@ -200,6 +200,18 @@ func (r *GameServerRepository) AssignHost(ctx context.Context, id, hostID string
 	return err
 }
 
+// UnassignHost clears a server's host placement (host_id -> NULL) without
+// otherwise touching its state. The reconciler calls it to drop a stale
+// assignment — a host that went down or reconnected under a new id after the
+// server was placed but before its VM booted — so the next start re-runs the
+// scheduler instead of retrying the dead host forever.
+func (r *GameServerRepository) UnassignHost(ctx context.Context, id string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE game_servers SET host_id = NULL, updated_at = now() WHERE id = $1`,
+		id)
+	return err
+}
+
 // MarkStatus sets the observed status and an optional message (empty -> NULL).
 func (r *GameServerRepository) MarkStatus(ctx context.Context, id, status, message string) error {
 	_, err := r.pool.Exec(ctx,

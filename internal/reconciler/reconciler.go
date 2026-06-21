@@ -118,6 +118,19 @@ func (r *Reconciler) start(ctx context.Context, s *model.GameServer) error {
 	// A server that still has a VM (e.g. an interrupted provision, retried before
 	// it was torn down) is resumed in place rather than rebuilt from scratch.
 	provisioned := s.VMID != nil && *s.VMID != ""
+	// A server placed but never booted (provisioning failed before a VM existed)
+	// holds only a capacity reservation, no host-local footprint. If its assigned
+	// host is no longer a ready placement target — it went down, or its agent
+	// reconnected under a new host id, orphaning the old one — drop that stale
+	// assignment so we re-schedule below. Without this the server is trapped:
+	// every retry re-targets the dead host and fails with "host has no live agent
+	// connection". A provisioned server keeps its host (its VM and world live
+	// there); only an unbooted one is free to move.
+	if !provisioned {
+		if err := r.dropStalePlacement(ctx, s); err != nil {
+			return err
+		}
+	}
 	// Place an unassigned server on a host before booting a VM. A stopped server
 	// was unplaced on stop, so it re-schedules here and may land on a new host
 	// (its world rides the durable store). A mid-flight server that still has a
@@ -164,6 +177,33 @@ func (r *Reconciler) place(ctx context.Context, s *model.GameServer) error {
 		return err
 	}
 	s.HostID = &hostID
+	return nil
+}
+
+// dropStalePlacement releases a server's reservation on a host that is no longer
+// a ready placement target and clears the assignment, so start() re-schedules it
+// onto a live host. It is a no-op for a server with no host or a host that is
+// still placeable. Callers must restrict it to unbooted servers (no VM): such a
+// server has no host-local footprint to lose, so moving it costs nothing, whereas
+// a running server's VM and world are pinned to its host.
+func (r *Reconciler) dropStalePlacement(ctx context.Context, s *model.GameServer) error {
+	if s.HostID == nil {
+		return nil
+	}
+	placeable, err := r.sched.Placeable(ctx, *s.HostID)
+	if err != nil {
+		return err
+	}
+	if placeable {
+		return nil
+	}
+	_ = r.sched.Release(ctx, *s.HostID, s.CPUs, s.MemoryMB)
+	if err := r.servers.UnassignHost(ctx, s.ID); err != nil {
+		return err
+	}
+	r.log.Info("released stale host placement; will reschedule",
+		zap.String("id", s.ID), zap.Stringp("stale_host_id", s.HostID))
+	s.HostID = nil
 	return nil
 }
 
