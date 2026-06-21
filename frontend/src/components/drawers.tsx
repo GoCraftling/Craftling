@@ -1,8 +1,9 @@
 /* drawers.tsx — ServerDrawer (detail) + CreateDrawer. */
-import { Fragment, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react"
 import { Icon } from "./icon"
 import { Btn, CopyBtn, StatusBadge } from "./primitives"
 import { SIZES, MAX_HOST_CPU, MAX_HOST_MEM } from "./servers-shared"
+import { api, ApiError } from "@/lib/api"
 import {
   MC_VERSIONS,
   fmtMem,
@@ -29,6 +30,75 @@ function Row2({ k, children }: { k: string; children: ReactNode }) {
       <span className="t-sm" style={{ textAlign: "right" }}>
         {children}
       </span>
+    </div>
+  )
+}
+
+// ServerLogs fetches and renders a server's captured console output on demand.
+// It reads through the owner endpoint when the viewer owns the server, or the
+// admin endpoint otherwise — mirroring the list views' owner/admin split.
+function ServerLogs({ serverId, isOwner }: { serverId: string; isOwner: boolean }) {
+  const [logs, setLogs] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  // All state updates happen in promise callbacks so this is safe to call from
+  // an effect (no synchronous setState in the effect body), matching the
+  // marketplace/hosts views' fetch pattern.
+  const load = useCallback(() => {
+    const fetch = isOwner ? api.getServerLogs(serverId) : api.adminGetServerLogs(serverId)
+    fetch
+      .then((text) => {
+        setLogs(text)
+        setError(null)
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.message : "could not load logs"))
+      .finally(() => setLoading(false))
+  }, [serverId, isOwner])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const refresh = () => {
+    setLoading(true)
+    load()
+  }
+
+  return (
+    <div>
+      <div className="between" style={{ marginBottom: 9 }}>
+        <div className="row gap-2 t-xs upper muted">
+          <Icon name="activity" size={13} /> Logs
+        </div>
+        <Btn variant="outline" size="sm" onClick={refresh} disabled={loading}>
+          <Icon name="refresh" size={13} className={loading ? "spin" : undefined} /> Refresh
+        </Btn>
+      </div>
+      {error ? (
+        <div className="row gap-2 t-sm" style={{ color: "var(--danger-fg)", alignItems: "flex-start" }}>
+          <Icon name="alert" size={15} style={{ marginTop: 1, flex: "none" }} />
+          <span>{error}</span>
+        </div>
+      ) : (
+        <pre
+          className="mono t-xs"
+          style={{
+            margin: 0,
+            maxHeight: 320,
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--muted)",
+            color: "var(--foreground)",
+          }}
+        >
+          {loading && logs === null ? "Loading…" : logs ? logs : "No logs yet."}
+        </pre>
+      )}
     </div>
   )
 }
@@ -283,6 +353,9 @@ export function ServerDrawer({
               <span className="muted">—</span>
             </Row2>
           </div>
+
+          {/* logs */}
+          <ServerLogs serverId={s.id} isOwner={isOwner} />
 
           {/* danger */}
           <div

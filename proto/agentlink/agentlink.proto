@@ -44,19 +44,21 @@ message Register {
 }
 
 // Command is one VM lifecycle request. payload is the JSON of the existing Go
-// type for the op (agent.VMSpec for provision; {"vm_id":...} otherwise), so the
-// command schema stays single-sourced in Go rather than duplicated here.
+// type for the op (agent.VMSpec for provision; agent.LogsRequest for logs;
+// {"vm_id":...} otherwise), so the command schema stays single-sourced in Go
+// rather than duplicated here.
 message Command {
   string id = 1;      // correlation id, echoed in the matching Result
-  string op = 2;      // provision|start|stop|snapshot|deprovision|status
+  string op = 2;      // provision|start|stop|snapshot|evict|deprovision|status|logs
   bytes payload = 3;  // JSON request body for the op
 }
 
 // Result answers a Command. payload is the JSON of agent.VM when the op returns
-// one (provision/start/status); error is non-empty when the op failed.
+// one (provision/start/status), the raw log bytes for logs, or empty; error is
+// non-empty when the op failed.
 message Result {
   string id = 1;     // matches the Command id
-  bytes payload = 2; // JSON agent.VM, or empty
+  bytes payload = 2; // JSON agent.VM, raw log bytes, or empty
   string error = 3;  // non-empty on failure
 }
 

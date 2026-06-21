@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -72,6 +73,12 @@ const (
 	shutdownGrace = 10 * time.Second
 )
 
+// logFileName is the per-VM file Firecracker's stdout/stderr is captured into.
+// With console=ttyS0 in the boot args this also carries the guest serial
+// console — kernel boot messages and the workload's own stdout/stderr — so it
+// is the host-side source for a server's logs.
+const logFileName = "firecracker.log"
+
 // boot launches the Firecracker process, waits for its API socket, configures
 // the machine, and starts the guest. On any failure it tears the process down
 // so a half-built VM never lingers.
@@ -79,7 +86,7 @@ func (m *machine) boot(ctx context.Context) error {
 	// A stale socket from a prior crash would make the dialer connect to nothing.
 	_ = os.Remove(m.socket)
 
-	logFile, err := os.Create(m.dir + "/firecracker.log")
+	logFile, err := os.Create(filepath.Join(m.dir, logFileName))
 	if err != nil {
 		return fmt.Errorf("create log: %w", err)
 	}

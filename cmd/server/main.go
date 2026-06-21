@@ -84,7 +84,16 @@ func main() {
 	hostRepo := repository.NewHostRepository()
 	gameServerRepo := repository.NewGameServerRepository(pool)
 
-	router := handler.NewRouter(cfg, zlog, pool, hostRepo)
+	// The hub is the control plane's end of the persistent agent connection:
+	// agents dial the gRPC listener and hold a stream open, and the hub pushes VM
+	// commands down it. It registers hosts (reconstructing committed capacity from
+	// the durable server records) and tracks liveness off the stream. Built here
+	// (before the router and reconciler) so both the on-demand log endpoint and
+	// the reconciler drive agents through the same remote provisioner.
+	hub := agentlink.NewHub(hostRepo, gameServerRepo, zlog)
+	prov := provisioner.NewRemote(hub)
+
+	router := handler.NewRouter(cfg, zlog, pool, hostRepo, prov)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -94,11 +103,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// The hub is the control plane's end of the persistent agent connection:
-	// agents dial the gRPC listener and hold a stream open, and the hub pushes VM
-	// commands down it. It registers hosts (reconstructing committed capacity
-	// from the durable server records) and tracks liveness off the stream.
-	hub := agentlink.NewHub(hostRepo, gameServerRepo, zlog)
 	grpcSrv := grpc.NewServer()
 	pb.RegisterAgentLinkServer(grpcSrv, hub)
 	grpcLis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
@@ -123,7 +127,6 @@ func main() {
 	// then drives the VM by calling the assigned host's agent (the control plane
 	// never touches KVM itself).
 	sched := scheduler.New(hostRepo)
-	prov := provisioner.NewRemote(hub)
 	rec := reconciler.New(gameServerRepo, prov, sched, hostDeadTTL, zlog)
 	go rec.Run(ctx, reconcileInterval)
 

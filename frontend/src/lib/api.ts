@@ -311,6 +311,17 @@ export const api = {
     return request<ApiServer>(`/servers/${id}`)
   },
 
+  // Owner-scoped: the captured console output of one's own server. The control
+  // plane reads it on demand from the backing VM's host.
+  getServerLogs(id: string): Promise<string> {
+    return request<{ logs: string }>(`/servers/${id}/logs`).then((r) => r.logs ?? "")
+  },
+
+  // Admin-only: the captured console output of any server, regardless of owner.
+  adminGetServerLogs(id: string): Promise<string> {
+    return request<{ logs: string }>(`/admin/servers/${id}/logs`).then((r) => r.logs ?? "")
+  },
+
   updateServer(id: string, input: UpdateServerInput): Promise<ApiServer> {
     return request<ApiServer>(`/servers/${id}`, { method: "PATCH", body: JSON.stringify(input) })
   },

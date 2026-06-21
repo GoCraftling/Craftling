@@ -27,6 +27,7 @@ type Commander interface {
 	Evict(ctx context.Context, hostID, vmID string) error
 	Deprovision(ctx context.Context, hostID, vmID string) error
 	Status(ctx context.Context, hostID, vmID string) (*agent.VM, error)
+	Logs(ctx context.Context, hostID, vmID string, tailLines int) ([]byte, error)
 }
 
 // RemoteProvisioner implements Provisioner by sending commands to the agent on
@@ -148,6 +149,20 @@ func (p *RemoteProvisioner) Snapshot(ctx context.Context, s *model.GameServer) e
 		return err
 	}
 	return p.cmd.Snapshot(ctx, hostID, *s.VMID)
+}
+
+// Logs asks the assigned host's agent for the server's captured console output.
+// A server with no backing VM has nothing to read, so it returns empty output
+// rather than erroring.
+func (p *RemoteProvisioner) Logs(ctx context.Context, s *model.GameServer, tailLines int) ([]byte, error) {
+	if s.VMID == nil || *s.VMID == "" {
+		return nil, nil
+	}
+	hostID, err := assignedHost(s)
+	if err != nil {
+		return nil, err
+	}
+	return p.cmd.Logs(ctx, hostID, *s.VMID, tailLines)
 }
 
 // assignedHost returns the server's assigned host id, or ErrUnplaced.

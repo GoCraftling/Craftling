@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/aarani/craftling-go/internal/runspec"
@@ -104,6 +105,10 @@ type Runtime interface {
 	// world into the durable store (P5c), on demand. ErrVMNotFound for an
 	// unknown id; an error if the runtime has no world store configured.
 	Snapshot(ctx context.Context, vmID string) error
+	// Logs returns the VM's captured console/VMM output, most recent last. When
+	// tailLines > 0 only the last that many lines are returned; <= 0 returns all
+	// available output. ErrVMNotFound for an unknown id.
+	Logs(ctx context.Context, vmID string, tailLines int) ([]byte, error)
 }
 
 // FakeRuntime is an in-memory Runtime that simulates VMs. It lets the control
@@ -302,6 +307,28 @@ func (r *FakeRuntime) Snapshot(_ context.Context, vmID string) error {
 		return ErrVMNotFound
 	}
 	return nil
+}
+
+// Logs returns synthetic console output for a known VM so the logs path can be
+// exercised end-to-end before a real driver exists. ErrVMNotFound for an
+// unknown id. tailLines is honored against the synthesized lines.
+func (r *FakeRuntime) Logs(_ context.Context, vmID string, tailLines int) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	fv, ok := r.vms[vmID]
+	if !ok {
+		return nil, ErrVMNotFound
+	}
+	lines := []string{
+		"[fake] vm " + vmID + " booting",
+		"[fake] server " + fv.vm.ServerID + " listening on " + fv.vm.Host,
+		"[fake] state " + fv.vm.State,
+	}
+	if tailLines > 0 && tailLines < len(lines) {
+		lines = lines[len(lines)-tailLines:]
+	}
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
 func clone(vm *VM) *VM {

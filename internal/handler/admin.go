@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/aarani/craftling-go/internal/logger"
@@ -14,11 +15,13 @@ type AdminHandler struct {
 	users   *repository.UserRepository
 	servers *repository.GameServerRepository
 	hosts   *repository.HostRepository
+	logs    LogProvider
 }
 
-// NewAdminHandler constructs an AdminHandler.
-func NewAdminHandler(users *repository.UserRepository, servers *repository.GameServerRepository, hosts *repository.HostRepository) *AdminHandler {
-	return &AdminHandler{users: users, servers: servers, hosts: hosts}
+// NewAdminHandler constructs an AdminHandler. logs may be nil only if the admin
+// logs endpoint is never exercised.
+func NewAdminHandler(users *repository.UserRepository, servers *repository.GameServerRepository, hosts *repository.HostRepository, logs LogProvider) *AdminHandler {
+	return &AdminHandler{users: users, servers: servers, hosts: hosts, logs: logs}
 }
 
 // ListUsers returns all users. Guarded by RequireRole(admin).
@@ -41,6 +44,20 @@ func (h *AdminHandler) ListServers(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"servers": servers})
+}
+
+// ServerLogs returns the captured console output of any server's backing VM,
+// regardless of owner. Guarded by RequireRole(admin).
+func (h *AdminHandler) ServerLogs(c *gin.Context) {
+	s, err := h.servers.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			logger.FromContext(c).Error("get server", zap.Error(err))
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+	writeLogs(c, h.logs, s)
 }
 
 // ListHosts returns the whole fleet inventory. Guarded by RequireRole(admin).

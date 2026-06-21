@@ -35,6 +35,9 @@ func (c fakeCommander) Deprovision(ctx context.Context, _, vmID string) error {
 func (c fakeCommander) Status(ctx context.Context, _, vmID string) (*agent.VM, error) {
 	return c.rt.Status(ctx, vmID)
 }
+func (c fakeCommander) Logs(ctx context.Context, _, vmID string, tailLines int) ([]byte, error) {
+	return c.rt.Logs(ctx, vmID, tailLines)
+}
 
 // errCommander fails loudly on every call, so a test can assert a code path is a
 // no-op that never reaches the command channel.
@@ -73,6 +76,11 @@ func (c errCommander) Deprovision(context.Context, string, string) error {
 func (c errCommander) Status(context.Context, string, string) (*agent.VM, error) {
 	c.t.Helper()
 	c.t.Fatal("Status called, want no-op")
+	return nil, errors.New("unreachable")
+}
+func (c errCommander) Logs(context.Context, string, string, int) ([]byte, error) {
+	c.t.Helper()
+	c.t.Fatal("Logs called, want no-op")
 	return nil, errors.New("unreachable")
 }
 
