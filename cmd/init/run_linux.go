@@ -253,18 +253,25 @@ func exitCode(ws syscall.WaitStatus) int {
 	return ws.ExitStatus()
 }
 
-// powerOff halts the microVM. As PID 1, returning or exiting would
-// trigger a kernel panic ("Attempted to kill init"); instead we ask the
-// kernel to power the machine off cleanly, which makes the Firecracker
-// VMM exit. The exit code is logged for the host to correlate via the
-// serial console.
+// powerOff shuts the microVM down. As PID 1, returning or exiting would
+// trigger a kernel panic ("Attempted to kill init"); instead we ask the kernel
+// to reset, which Firecracker traps (the guest's i8042 reset — the same
+// mechanism the host-side SendCtrlAltDel uses) and turns into a clean VMM exit.
+//
+// We deliberately use RESTART, not POWER_OFF: microVMs expose no ACPI, so
+// LINUX_REBOOT_CMD_POWER_OFF finds no power-off handler and the kernel falls
+// back to halting the CPU ("reboot: System halted"). That leaves the Firecracker
+// process alive forever, so the dead VM keeps holding its host capacity slot and
+// the host slowly wedges. A reset exits the VMM, freeing the slot. Firecracker
+// does not actually reboot the guest — a guest reset terminates the process.
+// The exit code is logged for the host to correlate via the serial console.
 func powerOff(logger *zap.Logger, code int) {
 	logger.Info("init: powering off", zap.Int("workload_exit_code", code))
 	syscall.Sync()
-	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_POWER_OFF); err != nil {
+	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil {
 		// Reboot failed (no CAP_SYS_BOOT, or not really PID 1 — e.g. a
 		// manual test run). Fall back to a normal exit.
-		logger.Error("init: power off failed", zap.Error(err))
+		logger.Error("init: reset failed", zap.Error(err))
 		os.Exit(code)
 	}
 	// Unreachable once the kernel acts on the reboot syscall.
