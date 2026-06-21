@@ -78,9 +78,17 @@ World persistence (P5) is off until you opt in:
 | `FC_WORLD_STORE_S3_*` | _(unset)_       | S3-compatible world store (`_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY`, `_USE_SSL`, `_PREFIX`); **takes precedence** over `FC_WORLD_STORE_DIR` |
 | `FC_SNAPSHOT_INTERVAL` | `0` (off)      | Periodic application-consistent snapshots of running VMs (needs a world store) |
 | `FC_RCON_PORT` / `FC_RCON_PASSWORD` | _(unset)_ | Let the guest flush the workload via RCON before freezing its disk for a live snapshot |
+| `FC_UPLINK`       | _(unset)_          | Host NIC (e.g. `eth0`, `ens5`) the eBPF NAT dataplane attaches to. **Setting it turns on per-server host ports**; left unset, every VM falls back to `25565`, so multiple servers on one host collide on the same port |
+| `FC_VM_SUBNET`    | `10.222.0.0/16`    | CIDR private VM addresses are drawn from (only with `FC_UPLINK`)        |
+| `FC_GATEWAY_IP`   | first usable host  | Shared virtual gateway VMs route through; must fall inside `FC_VM_SUBNET` |
+| `FC_HOST_PORT_MIN` / `FC_HOST_PORT_MAX` | `30000` / `40000` | Bounds of the public host-port pool DNAT'd to in-VM services (only with `FC_UPLINK`) |
 
-The eBPF NAT dataplane (P6) activates automatically on a Linux ≥6.6 agent host
-with `nf_conntrack`/`nf_nat` available; it needs no extra env to run.
+The eBPF NAT dataplane (P6) is gated on `FC_UPLINK`: set it to the host's egress
+NIC and the dataplane comes up, giving each server a distinct public host port
+from the `FC_HOST_PORT_MIN`–`FC_HOST_PORT_MAX` pool. With `FC_UPLINK` unset the
+host keeps MMDS-only networking and every VM reports the standard `25565`, so two
+servers on one host appear to share a port. It needs a Linux ≥6.6 agent host with
+`nf_conntrack`/`nf_nat` available.
 
 `AGENT_ID`, `AGENT_HOSTNAME`, `ZONE`, `CPUS_TOTAL`, `MEMORY_MB_TOTAL`, and
 `AGENT_VERSION` further describe the host in its registration.

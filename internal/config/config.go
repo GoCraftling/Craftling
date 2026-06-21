@@ -99,6 +99,24 @@ type FirecrackerConfig struct {
 	// WorkDir is where per-VM working dirs live (empty: OS temp dir).
 	WorkDir string
 
+	// UplinkDevice is the host NIC the eBPF NAT dataplane attaches to (e.g.
+	// "eth0", "ens5"). Setting it turns on the dataplane and, with it, the
+	// per-server public host-port pool — without it every VM falls back to the
+	// standard in-VM port, so multiple servers on one host all report 25565.
+	// Empty keeps the legacy MMDS-only networking and the other NAT fields below
+	// are ignored.
+	UplinkDevice string
+	// VMSubnet is the CIDR private VM addresses are drawn from (driver default
+	// when empty). Only used when UplinkDevice is set.
+	VMSubnet string
+	// GatewayIP is the shared virtual gateway VMs route through; must fall inside
+	// VMSubnet. Empty defaults to the subnet's first usable host.
+	GatewayIP string
+	// HostPortMin / HostPortMax bound the public host-port pool DNAT'd to in-VM
+	// services (driver defaults when zero). Only used when UplinkDevice is set.
+	HostPortMin int
+	HostPortMax int
+
 	// WorldPersistence enables the per-server world disk + guest overlay
 	// (P5a). Requires mkfs.ext4 on the host and a guest kernel with
 	// CONFIG_OVERLAY_FS + CONFIG_EXT4_FS.
@@ -171,6 +189,11 @@ func Load() *Config {
 				InitBinAmd64:     getEnv("FC_INIT_BIN_AMD64", ""),
 				InitBinArm64:     getEnv("FC_INIT_BIN_ARM64", ""),
 				WorkDir:          getEnv("FC_WORK_DIR", ""),
+				UplinkDevice:     getEnv("FC_UPLINK", ""),
+				VMSubnet:         getEnv("FC_VM_SUBNET", ""),
+				GatewayIP:        getEnv("FC_GATEWAY_IP", ""),
+				HostPortMin:      getIntEnv("FC_HOST_PORT_MIN", 0),
+				HostPortMax:      getIntEnv("FC_HOST_PORT_MAX", 0),
 				WorldPersistence: getBoolEnv("FC_WORLD_PERSIST", false),
 				DataDir:          getEnv("FC_DATA_DIR", ""),
 				WorldDiskMB:      getIntEnv("FC_WORLD_DISK_MB", 0),

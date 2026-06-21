@@ -88,6 +88,15 @@ services:
       # Where converted, content-addressed squashfs rootfs files are cached.
       FC_IMAGE_CACHE_DIR: /var/lib/craftling/images
       FC_WORK_DIR: /var/lib/craftling/work
+      # NIC the eBPF NAT dataplane attaches to. Setting it gives each server a
+      # distinct public host port from the FC_HOST_PORT_MIN–FC_HOST_PORT_MAX
+      # pool; without it every VM falls back to 25565 and servers on this host
+      # collide on the same port. Set to the host's real egress interface.
+      FC_UPLINK: ens16
+      # Optional NAT overrides (driver defaults shown):
+      # FC_VM_SUBNET: 10.222.0.0/16
+      # FC_HOST_PORT_MIN: "30000"
+      # FC_HOST_PORT_MAX: "40000"
     devices:
       # Mount KVM so Firecracker can boot microVMs.
       - "/dev/kvm:/dev/kvm"
