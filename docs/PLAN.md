@@ -53,7 +53,10 @@ A third binary, **`cmd/init`**, is the in-guest PID 1 baked into every rootfs.
   `00001_baseline`, `00002_game_servers_host_id`, `00003_game_servers_backup`.
 - **API surface** (`internal/handler/router.go`): auth
   (register/login/refresh/logout/me), owner-scoped servers (CRUD +
-  `POST /servers/:id/snapshot`), templates (list/get), admin
+  `POST /servers/:id/snapshot`), owner-scoped players/whitelist
+  (`/players` CRUD — a roster of usernames each granted onto a checkable subset
+  of the owner's servers), templates (list/get), quotas + billing
+  (`/quota`, `/billing`, admin `/admin/users/:id/{quota,billing}`), admin
   (users/servers/hosts), `healthz`/`ping`. Agents are **not** on the HTTP API:
   they connect over the gRPC `AgentLink` stream (`internal/agentlink`, separate
   `GRPC_PORT` listener), which carries registration, heartbeats, and command
@@ -204,8 +207,9 @@ it is feature-complete for IPv4 TCP/UDP.)*
 - **Frontend** (`frontend/src`, React/Vite): auth screen, servers view (CRUD,
   restart, snapshot), marketplace/templates view (configure a template and launch
   a real server — the control plane resolves image + env server-side); then it
-  hands off to the servers view to watch provisioning. The host-fleet and
-  **Quotas & Users** (per-user quotas + pay-as-you-go billing, P9) views are
+  hands off to the servers view to watch provisioning. The host-fleet,
+  **Quotas & Users** (per-user quotas + pay-as-you-go billing, P9), and
+  **Players** (whitelist roster with per-server check/uncheck grants) views are
   built; settings/observability remain stub routes. Calls the control-plane API
   via `lib/api.ts` with transparent refresh-token rotation.
 

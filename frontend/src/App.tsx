@@ -4,6 +4,7 @@ import { AppShell, type Route } from "@/components/app-shell"
 import { AuthScreen } from "@/components/auth-screen"
 import { ServersView } from "@/components/servers-view"
 import { MarketplaceView } from "@/components/marketplace-view"
+import { PlayersView } from "@/components/players-view"
 import { HostsView } from "@/components/hosts-view"
 import { QuotasView } from "@/components/quotas-view"
 import { StubView } from "@/components/stub-view"
@@ -54,6 +55,8 @@ export function App() {
         <ServersView role={role} onCountChange={setServerCount} />
       ) : route === "marketplace" ? (
         <MarketplaceView onLaunched={() => setRoute("servers")} />
+      ) : route === "players" ? (
+        <PlayersView />
       ) : route === "hosts" ? (
         <HostsView />
       ) : route === "quotas" ? (
