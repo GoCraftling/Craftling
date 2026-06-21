@@ -204,9 +204,10 @@ it is feature-complete for IPv4 TCP/UDP.)*
 - **Frontend** (`frontend/src`, React/Vite): auth screen, servers view (CRUD,
   restart, snapshot), marketplace/templates view (configure a template and launch
   a real server — the control plane resolves image + env server-side); then it
-  hands off to the servers view to watch provisioning. hosts/scheduler/quotas are
-  stub routes. Calls the control-plane API via `lib/api.ts` with transparent
-  refresh-token rotation. No hosts/metrics/health UI yet.
+  hands off to the servers view to watch provisioning. The host-fleet and
+  **Quotas & Users** (per-user quotas + pay-as-you-go billing, P9) views are
+  built; settings/observability remain stub routes. Calls the control-plane API
+  via `lib/api.ts` with transparent refresh-token rotation.
 
 ---
 
@@ -263,11 +264,34 @@ it is feature-complete for IPv4 TCP/UDP.)*
   replicas.
 - **Verify:** kill a host in test → servers rescheduled; error path backs off.
 
-### P9 — Quotas / resource controls  ⏳ not started
-- `user_quotas` table (`max_servers`, `max_cpus`, `max_memory_mb`); enforce in
-  Create/Update against current usage; admin endpoints to view/set. (No quota code
-  exists today; the frontend route is a stub.)
-- **Verify:** e2e — exceed quota → `403`.
+### P9 — Quotas / resource controls + billing  ✅ done
+- **Quotas.** `user_quotas` table (migration `00006`: `max_servers`, `max_cpus`,
+  `max_memory_mb`, `0` = unlimited per axis) holds admin-set per-user overrides; a
+  user without a row falls back to the configurable **system default**
+  (`QUOTA_MAX_*`). Enforcement is a single point — `ServerHandler.Create` checks
+  the owner's current usage (`GameServerRepository.OwnerUsage`, counting every
+  live server, running or stopped) against their effective quota
+  (`model.UserQuota.Allows`) and returns **403** with the breached dimension
+  before placement. The update path edits no resource-affecting field, so create
+  is the only gate. Endpoints: `GET /quota` (self view: quota + usage),
+  `GET/PUT/DELETE /admin/users/:id/quota` (view / set / revert-to-default).
+- **Billing (pay-as-you-go, hourly).** `billing_usage` table (migration `00007`)
+  is a metered ledger: the reconciler opens an interval when a server is marked
+  running and closes it on stop / lost / delete (both idempotent — a partial
+  unique index guarantees one open interval per server, so a retry can't
+  double-bill). Cost is summed running time priced at per-vCPU-hour and
+  per-GB-hour rates (`BILLING_*`); `internal/billing` holds the pure pricing,
+  `BillingRepository.OwnerLedger` the period-clamped aggregation (month-to-date,
+  open intervals measured to now). Endpoints: `GET /billing` (self) and
+  `GET /admin/users/:id/billing` — each returns per-server line items, the period
+  total, and the live hourly burn.
+- **Frontend.** The **Quotas & Users** view (was a stub) is built: per-user
+  usage-vs-limit with meters, inline quota editing + reset-to-default, and a
+  pay-as-you-go cost column with the live burn rate; fleet burn/spend tiles.
+- **Verify:** ✅ unit — `model.UserQuota.Allows` table tests, `billing` pricing
+  tests; ✅ e2e (`test/e2e/quota_test.go`, `billing_test.go`) — exceed quota →
+  `403`, admin set/get/delete + authorization, and the meter opening/closing as a
+  server runs then stops.
 
 ### P10 — Hardening & ops  ⏳ largely not started
 - **Agent↔control-plane auth:** the gRPC `AgentLink` stream is **unauthenticated**
@@ -289,9 +313,9 @@ it is feature-complete for IPv4 TCP/UDP.)*
 ## Dependency order
 
 `P0 → P1 → P2 → P3 → P4 → P6` are **done** (compute + player-access path). `P5`
-(done) sits on P3 and gates safe reschedule in P8. Remaining:
-`P7` and `P9` depend on P3 (any time); `P8` depends on P2 + P5; `P10` is last and
-cross-cutting. Housekeeping is independent.
+(done) sits on P3 and gates safe reschedule in P8. `P9` (quotas + billing) is
+**done**. Remaining: `P7`'s metrics work depends on P3 (any time); `P8` depends
+on P2 + P5; `P10` is last and cross-cutting. Housekeeping is independent.
 
 ## Components at a glance
 
@@ -306,5 +330,5 @@ cross-cutting. Housekeeping is independent.
 | P6 | ✅ | — | `firecracker/{nat,tap,tapfilter,netalloc}*`, `bpf/`, `cmd/init/net*` | host/port written back (existing cols) |
 | P7 | 🟡 | `cmd/init` (HEALTH proxy) | `internal/minecraft` (SLP+RCON), firecracker health sweep, vsock `HEALTH`; metrics pending | `game_servers.players_online/players_max/last_seen` (`00005`) |
 | P8 | ⏳ | — | backoff, host-failure reschedule + fencing, draining, leader election | `game_servers.attempts/next_attempt_at` |
-| P9 | ⏳ | — | quota enforcement | `user_quotas` |
+| P9 | ✅ | — | quota enforcement (`model.UserQuota`, `repository.Quota`, handler `Create` gate); pay-as-you-go billing (`internal/billing`, `repository.Billing` meter wired into the reconciler) | `user_quotas` (`00006`), `billing_usage` (`00007`) |
 | P10 | ⏳ | — | agent auth, secret fail-fast, jailer/seccomp | per-host agent creds |

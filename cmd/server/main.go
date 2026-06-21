@@ -127,7 +127,10 @@ func main() {
 	// then drives the VM by calling the assigned host's agent (the control plane
 	// never touches KVM itself).
 	sched := scheduler.New(hostRepo)
-	rec := reconciler.New(gameServerRepo, prov, sched, hostDeadTTL, zlog)
+	// The billing meter records each server's running intervals for pay-as-you-go
+	// billing (P9); the reconciler opens/closes them on state transitions.
+	billingRepo := repository.NewBillingRepository(pool)
+	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, hostDeadTTL, zlog)
 	go rec.Run(ctx, reconcileInterval)
 
 	// If a durable world store is configured, periodically GC snapshots that no

@@ -19,11 +19,21 @@ import (
 // pass, so one slow or wedged host can't stall the whole reconcile tick.
 const livenessProbeTimeout = 10 * time.Second
 
+// Meter records billable running time for pay-as-you-go hourly billing (P9). A
+// server's clock starts when the reconciler marks it running and stops when it
+// stops, is lost, or is deleted. Both methods are idempotent so a retry can't
+// double-bill. It is optional: a nil Meter disables billing entirely.
+type Meter interface {
+	StartRunning(ctx context.Context, s *model.GameServer) error
+	StopRunning(ctx context.Context, serverID string) error
+}
+
 // Reconciler periodically converges game servers toward their desired state.
 type Reconciler struct {
 	servers *repository.GameServerRepository
 	prov    provisioner.Provisioner
 	sched   *scheduler.Scheduler
+	meter   Meter
 	log     *zap.Logger
 	// hostDeadAfter is how long a running server's host may stay unreachable
 	// before the reconciler presumes the VM dead and reschedules. It must exceed
@@ -33,8 +43,30 @@ type Reconciler struct {
 
 // New constructs a Reconciler. hostDeadAfter is the grace a running server's host
 // gets to come back before its VM is presumed dead (see Reconciler.hostDeadAfter).
-func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, hostDeadAfter time.Duration, log *zap.Logger) *Reconciler {
-	return &Reconciler{servers: servers, prov: prov, sched: sched, hostDeadAfter: hostDeadAfter, log: log}
+// meter may be nil to disable billing metering.
+func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, hostDeadAfter time.Duration, log *zap.Logger) *Reconciler {
+	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, hostDeadAfter: hostDeadAfter, log: log}
+}
+
+// startBilling opens a server's metered running interval (best-effort: a billing
+// failure is logged, never blocks reconciliation).
+func (r *Reconciler) startBilling(ctx context.Context, s *model.GameServer) {
+	if r.meter == nil {
+		return
+	}
+	if err := r.meter.StartRunning(ctx, s); err != nil {
+		r.log.Warn("billing: start running", zap.String("id", s.ID), zap.Error(err))
+	}
+}
+
+// stopBilling closes a server's open metered interval (best-effort).
+func (r *Reconciler) stopBilling(ctx context.Context, serverID string) {
+	if r.meter == nil {
+		return
+	}
+	if err := r.meter.StopRunning(ctx, serverID); err != nil {
+		r.log.Warn("billing: stop running", zap.String("id", serverID), zap.Error(err))
+	}
 }
 
 // Run reconciles on each tick until ctx is cancelled.
@@ -209,7 +241,11 @@ func (r *Reconciler) hostDeadTooLong(ctx context.Context, s *model.GameServer) (
 func (r *Reconciler) markLost(ctx context.Context, s *model.GameServer, message string) {
 	if err := r.servers.MarkLost(ctx, s.ID, message); err != nil {
 		r.log.Error("mark server lost", zap.String("id", s.ID), zap.Error(err))
+		return
 	}
+	// The VM is gone, so stop the billing clock; the re-provision in a later tick
+	// opens a fresh interval, so only observed-running time is ever billed.
+	r.stopBilling(ctx, s.ID)
 }
 
 // reconcile advances a single server one step toward its desired state.
@@ -299,7 +335,12 @@ func (r *Reconciler) start(ctx context.Context, s *model.GameServer) error {
 	r.log.Info("server running",
 		zap.String("id", s.ID), zap.String("vm_id", inst.VMID),
 		zap.Stringp("host_id", s.HostID), zap.Bool("resumed", provisioned))
-	return r.servers.MarkRunning(ctx, s.ID, inst.VMID, inst.Host, inst.Port)
+	if err := r.servers.MarkRunning(ctx, s.ID, inst.VMID, inst.Host, inst.Port); err != nil {
+		return err
+	}
+	// The server is now running: start (or resume) its billing clock.
+	r.startBilling(ctx, s)
+	return nil
 }
 
 // place asks the scheduler for a host, reserves its capacity, and persists the
@@ -397,8 +438,12 @@ func (r *Reconciler) stop(ctx context.Context, s *model.GameServer) error {
 	if s.HostID != nil {
 		_ = r.sched.Release(ctx, *s.HostID, s.CPUs, s.MemoryMB)
 	}
+	if err := r.servers.MarkStopped(ctx, s.ID); err != nil {
+		return err
+	}
 	r.log.Info("server stopped", zap.String("id", s.ID))
-	return r.servers.MarkStopped(ctx, s.ID)
+	r.stopBilling(ctx, s.ID)
+	return nil
 }
 
 func (r *Reconciler) delete(ctx context.Context, s *model.GameServer) error {
@@ -429,6 +474,12 @@ func (r *Reconciler) delete(ctx context.Context, s *model.GameServer) error {
 	if s.HostID != nil {
 		_ = r.sched.Release(ctx, *s.HostID, s.CPUs, s.MemoryMB)
 	}
+	if err := r.servers.SoftDelete(ctx, s.ID); err != nil {
+		return err
+	}
 	r.log.Info("server deleted", zap.String("id", s.ID))
-	return r.servers.SoftDelete(ctx, s.ID)
+	// Close any open interval so a deleted server stops accruing; its retained
+	// rows still bill for the time it ran.
+	r.stopBilling(ctx, s.ID)
+	return nil
 }

@@ -226,6 +226,21 @@ func (r *GameServerRepository) UsedCapacity(ctx context.Context, hostID string) 
 	return cpus, memoryMB, err
 }
 
+// OwnerUsage returns a user's current committed allocation for quota
+// enforcement (P9): the count of their live (non-deleted) servers and the sum of
+// those servers' cpu and memory. A stopped server still counts — the quota caps
+// what a user owns, not only what is running — so this sums every non-deleted
+// row regardless of status, unlike the per-host UsedCapacity.
+func (r *GameServerRepository) OwnerUsage(ctx context.Context, ownerID string) (model.QuotaUsage, error) {
+	var u model.QuotaUsage
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(cpus), 0), COALESCE(SUM(memory_mb), 0)
+		FROM game_servers
+		WHERE owner_id = $1 AND deleted_at IS NULL`,
+		ownerID).Scan(&u.Servers, &u.CPUs, &u.MemoryMB)
+	return u, err
+}
+
 // AssignHost records the fleet host the scheduler placed a server on (P2). The
 // capacity reservation itself lives in the host inventory; this persists the
 // assignment so it survives a reconciler restart and is visible in the API.

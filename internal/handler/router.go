@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/aarani/craftling-go/internal/auth"
+	"github.com/aarani/craftling-go/internal/billing"
 	"github.com/aarani/craftling-go/internal/config"
 	"github.com/aarani/craftling-go/internal/middleware"
 	"github.com/aarani/craftling-go/internal/model"
@@ -28,14 +29,28 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 	userRepo := repository.NewUserRepository(pool)
 	refreshRepo := repository.NewRefreshTokenRepository(pool)
 	gameServerRepo := repository.NewGameServerRepository(pool)
+	// The quota repository carries the system default quota; a user without an
+	// admin-set override is held to it (P9).
+	quotaRepo := repository.NewQuotaRepository(pool, model.UserQuota{
+		MaxServers:  cfg.Quota.MaxServers,
+		MaxCPUs:     cfg.Quota.MaxCPUs,
+		MaxMemoryMB: cfg.Quota.MaxMemoryMB,
+	})
+	billingRepo := repository.NewBillingRepository(pool)
 	authHandler := NewAuthHandler(userRepo, refreshRepo, jwtManager, cfg.RefreshTTL)
 	adminHandler := NewAdminHandler(userRepo, gameServerRepo, hostRepo, logs)
+	quotaHandler := NewQuotaHandler(quotaRepo, gameServerRepo, userRepo)
+	billingHandler := NewBillingHandler(billingRepo, userRepo, billing.Rates{
+		CPUHour:      cfg.Billing.CPUHour,
+		MemoryGBHour: cfg.Billing.MemoryGBHour,
+		Currency:     cfg.Billing.Currency,
+	})
 	// One registry client backs both the template browse endpoints and the
 	// server-side template resolution the create handler performs.
 	registryClient := registry.New(cfg.TemplateIndexURL, &http.Client{Timeout: 10 * time.Second})
 	// The scheduler is stateless over the shared in-memory host inventory, so the
 	// handler builds its own; the reconciler builds another over the same store.
-	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo), registryClient, logs)
+	serverHandler := NewServerHandler(gameServerRepo, scheduler.New(hostRepo), quotaRepo, registryClient, logs)
 	templateHandler := NewTemplateHandler(registryClient)
 
 	r := gin.New()
@@ -58,6 +73,10 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 		protected.Use(middleware.Auth(jwtManager))
 		{
 			protected.GET("/me", authHandler.Me)
+			// A user's own effective quota and current usage (P9).
+			protected.GET("/quota", quotaHandler.Mine)
+			// A user's own pay-as-you-go bill for the current period (P9).
+			protected.GET("/billing", billingHandler.Mine)
 		}
 
 		// Game server CRUD (owner-scoped).
@@ -89,6 +108,13 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 			admin.GET("/servers", adminHandler.ListServers)
 			admin.GET("/servers/:id/logs", adminHandler.ServerLogs)
 			admin.GET("/hosts", adminHandler.ListHosts)
+			// Per-user quota view/set (P9). Setting an empty body or an absent
+			// override reverts the user to the system default via DELETE.
+			admin.GET("/users/:id/quota", quotaHandler.GetForUser)
+			admin.PUT("/users/:id/quota", quotaHandler.SetForUser)
+			admin.DELETE("/users/:id/quota", quotaHandler.DeleteForUser)
+			// Per-user pay-as-you-go bill (P9).
+			admin.GET("/users/:id/billing", billingHandler.GetForUser)
 		}
 
 		// Hosts no longer register/heartbeat over HTTP: each agent holds a

@@ -41,15 +41,17 @@ type LogProvider interface {
 type ServerHandler struct {
 	servers   *repository.GameServerRepository
 	sched     *scheduler.Scheduler
+	quotas    *repository.QuotaRepository
 	templates TemplateResolver
 	logs      LogProvider
 }
 
 // NewServerHandler constructs a ServerHandler. templates may be nil only if the
 // template-launch path is never exercised; logs may be nil only if the logs
-// endpoint is never exercised.
-func NewServerHandler(servers *repository.GameServerRepository, sched *scheduler.Scheduler, templates TemplateResolver, logs LogProvider) *ServerHandler {
-	return &ServerHandler{servers: servers, sched: sched, templates: templates, logs: logs}
+// endpoint is never exercised; quotas may be nil only if Create is never
+// exercised (it enforces the per-user resource quota).
+func NewServerHandler(servers *repository.GameServerRepository, sched *scheduler.Scheduler, quotas *repository.QuotaRepository, templates TemplateResolver, logs LogProvider) *ServerHandler {
+	return &ServerHandler{servers: servers, sched: sched, quotas: quotas, templates: templates, logs: logs}
 }
 
 // createServerRequest is the create payload. A request takes one of two shapes:
@@ -104,6 +106,14 @@ func (h *ServerHandler) Create(c *gin.Context) {
 			return
 		}
 		s.Version = req.Version
+	}
+
+	// Enforce the owner's resource quota (P9) before admitting the server: count
+	// their current allocation and reject if this server would push any dimension
+	// (server count / cpu / memory) over the cap. Done before the capacity check
+	// so a quota breach reads as 403, not a fleet-capacity 400.
+	if !h.withinQuota(c, s.OwnerID, s.CPUs, s.MemoryMB) {
+		return // withinQuota wrote the error response
 	}
 
 	// Reject a spec no host could ever run, rather than admitting a server that
@@ -337,6 +347,33 @@ func (h *ServerHandler) ownedOr404(c *gin.Context) (*model.GameServer, bool) {
 		return nil, false
 	}
 	return s, true
+}
+
+// withinQuota checks that adding a server with the given cpu/memory spec keeps
+// the owner inside their effective quota (P9). It writes a 403 (with the
+// breached dimension) and returns false on a quota breach, or a 500 on a lookup
+// error; true means the create may proceed. Resource changes only ever happen at
+// create — the update path edits no quota-relevant field — so this is the single
+// enforcement point.
+func (h *ServerHandler) withinQuota(c *gin.Context, ownerID string, cpus, memoryMB int) bool {
+	ctx := c.Request.Context()
+	quota, err := h.quotas.Get(ctx, ownerID)
+	if err != nil {
+		logger.FromContext(c).Error("get quota", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return false
+	}
+	usage, err := h.servers.OwnerUsage(ctx, ownerID)
+	if err != nil {
+		logger.FromContext(c).Error("owner usage", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return false
+	}
+	if ok, reason := quota.Allows(usage, cpus, memoryMB); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": reason})
+		return false
+	}
+	return true
 }
 
 func orDefault(v, d int) int {
