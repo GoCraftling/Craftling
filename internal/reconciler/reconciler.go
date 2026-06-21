@@ -14,17 +14,26 @@ import (
 	"go.uber.org/zap"
 )
 
+// livenessProbeTimeout bounds a single agent Status round-trip in the liveness
+// pass, so one slow or wedged host can't stall the whole reconcile tick.
+const livenessProbeTimeout = 10 * time.Second
+
 // Reconciler periodically converges game servers toward their desired state.
 type Reconciler struct {
 	servers *repository.GameServerRepository
 	prov    provisioner.Provisioner
 	sched   *scheduler.Scheduler
 	log     *zap.Logger
+	// hostDeadAfter is how long a running server's host may stay unreachable
+	// before the reconciler presumes the VM dead and reschedules. It must exceed
+	// the heartbeat TTL so a brief agent restart isn't mistaken for a loss.
+	hostDeadAfter time.Duration
 }
 
-// New constructs a Reconciler.
-func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, log *zap.Logger) *Reconciler {
-	return &Reconciler{servers: servers, prov: prov, sched: sched, log: log}
+// New constructs a Reconciler. hostDeadAfter is the grace a running server's host
+// gets to come back before its VM is presumed dead (see Reconciler.hostDeadAfter).
+func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, hostDeadAfter time.Duration, log *zap.Logger) *Reconciler {
+	return &Reconciler{servers: servers, prov: prov, sched: sched, hostDeadAfter: hostDeadAfter, log: log}
 }
 
 // Run reconciles on each tick until ctx is cancelled.
@@ -51,6 +60,11 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 // is still making progress. Provisioning is bounded by the agent-side image
 // pull timeout and by process shutdown (ctx cancellation), not by this loop.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) {
+	// First re-check servers we believe are already running: the convergence loop
+	// below never revisits them (their status matches desire), so this is the only
+	// place a VM that died under us gets noticed and dropped back to pending.
+	r.checkLiveness(ctx)
+
 	servers, err := r.servers.ListReconcilable(ctx)
 	if err != nil {
 		r.log.Error("list reconcilable servers", zap.Error(err))
@@ -63,6 +77,83 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 			r.log.Error("reconcile server", zap.String("id", s.ID), zap.Error(err))
 			_ = r.servers.MarkStatus(ctx, s.ID, model.StatusError, err.Error())
 		}
+	}
+}
+
+// checkLiveness re-examines every server we believe is running and asks its
+// host's agent whether the VM is still there. A server at its desired state is
+// otherwise never revisited, so without this a VM that vanishes — its agent
+// restarted and lost it, or its host dropped off the fleet — leaves the server
+// stuck "running" behind a dead port forever. Anything it finds dead is dropped
+// to pending; the convergence loop in the same tick then re-provisions it.
+func (r *Reconciler) checkLiveness(ctx context.Context) {
+	servers, err := r.servers.ListRunning(ctx)
+	if err != nil {
+		r.log.Error("list running servers", zap.Error(err))
+		return
+	}
+	for i := range servers {
+		r.checkServerLiveness(ctx, &servers[i])
+	}
+}
+
+// checkServerLiveness probes one running server's VM and recovers it if dead.
+// The three outcomes:
+//   - the agent reports the VM running: healthy, nothing to do;
+//   - the agent answers but the VM is gone (it is alive, the VM is not): drop to
+//     pending so it re-provisions in place — the host is up;
+//   - the agent is unreachable: the host may just be restarting, so wait out
+//     hostDeadAfter before presuming the VM dead; past it, drop to pending and
+//     let start() reschedule onto a live host.
+func (r *Reconciler) checkServerLiveness(ctx context.Context, s *model.GameServer) {
+	probeCtx, cancel := context.WithTimeout(ctx, livenessProbeTimeout)
+	state, err := r.prov.Status(probeCtx, s)
+	cancel()
+	if err != nil {
+		dead, derr := r.hostDeadTooLong(ctx, s)
+		if derr != nil {
+			r.log.Error("liveness: host check", zap.String("id", s.ID), zap.Error(derr))
+			return
+		}
+		if !dead {
+			return // within grace; give the host a chance to come back
+		}
+		r.log.Warn("running server's host unreachable past grace; reprovisioning",
+			zap.String("id", s.ID), zap.Stringp("host_id", s.HostID), zap.Error(err))
+		r.markLost(ctx, s, "host unreachable; reprovisioning")
+		return
+	}
+	if state == provisioner.StateRunning {
+		return
+	}
+	r.log.Warn("running server has no live VM; reprovisioning",
+		zap.String("id", s.ID), zap.Stringp("vm_id", s.VMID), zap.String("observed", string(state)))
+	r.markLost(ctx, s, "vm not found on host; reprovisioning")
+}
+
+// hostDeadTooLong reports whether a server's assigned host has been unreachable
+// long enough (hostDeadAfter since its last heartbeat) to presume its VM dead. A
+// server with no host, or whose host has fallen out of the inventory entirely,
+// is dead by definition.
+func (r *Reconciler) hostDeadTooLong(ctx context.Context, s *model.GameServer) (bool, error) {
+	if s.HostID == nil {
+		return true, nil
+	}
+	last, known, err := r.sched.LastHeartbeat(ctx, *s.HostID)
+	if err != nil {
+		return false, err
+	}
+	if !known {
+		return true, nil
+	}
+	return time.Since(last) > r.hostDeadAfter, nil
+}
+
+// markLost drops a presumed-dead running server back to pending for re-provision,
+// logging (not propagating) a failure since the next tick simply retries.
+func (r *Reconciler) markLost(ctx context.Context, s *model.GameServer, message string) {
+	if err := r.servers.MarkLost(ctx, s.ID, message); err != nil {
+		r.log.Error("mark server lost", zap.String("id", s.ID), zap.Error(err))
 	}
 }
 

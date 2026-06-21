@@ -133,7 +133,7 @@ func TestMain(m *testing.M) {
 	recCtx, recCancel := context.WithCancel(ctx)
 	sched := scheduler.New(hostRepo)
 	prov := provisioner.NewRemote(hub)
-	rec := reconciler.New(gameServerRepo, prov, sched, zap.NewNop())
+	rec := reconciler.New(gameServerRepo, prov, sched, 30*time.Second, zap.NewNop())
 	go rec.Run(recCtx, 100*time.Millisecond)
 
 	// Bring up the always-on placement host as an in-process agent dialing the hub

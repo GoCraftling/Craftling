@@ -119,6 +119,39 @@ func (r *GameServerRepository) ListReconcilable(ctx context.Context) ([]model.Ga
 	return r.query(ctx, q)
 }
 
+// ListRunning returns live servers the control plane believes are up and wants
+// up: status 'running' with desired_state 'running'. ListReconcilable
+// deliberately excludes these (their observed status already matches desire), so
+// the reconciler health-checks them separately — otherwise a server whose VM
+// died under it (its agent restarted and lost the VM, or its host fell off the
+// fleet) would sit "running" forever behind a dead port, never revisited.
+func (r *GameServerRepository) ListRunning(ctx context.Context) ([]model.GameServer, error) {
+	const q = `
+		SELECT ` + gameServerColumns + ` FROM game_servers
+		WHERE deleted_at IS NULL
+		  AND status = 'running'
+		  AND desired_state = 'running'
+		ORDER BY updated_at
+		LIMIT 100`
+	return r.query(ctx, q)
+}
+
+// MarkLost drops a server we believed running back to 'pending' and clears its
+// now-dead VM id, so the reconciler re-provisions it from scratch. It leaves the
+// host assignment untouched: start() re-runs placement only when that host is no
+// longer a ready target (dropStalePlacement), so a host that recovers keeps the
+// server in place while a host that is truly gone lets it reschedule elsewhere.
+// The status guard makes it a no-op if the row already moved on (e.g. the user
+// stopped or deleted it between the health probe and here).
+func (r *GameServerRepository) MarkLost(ctx context.Context, id, message string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE game_servers
+		SET status = 'pending', vm_id = NULL, status_message = NULLIF($2, ''), updated_at = now()
+		WHERE id = $1 AND deleted_at IS NULL AND status = 'running'`,
+		id, message)
+	return err
+}
+
 // ListActiveIDs returns the ids of every live (non-deleted) server. The world
 // GC reaper uses it to find stored worlds that no live server claims.
 func (r *GameServerRepository) ListActiveIDs(ctx context.Context) ([]string, error) {

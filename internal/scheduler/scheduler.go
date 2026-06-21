@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/aarani/craftling-go/internal/model"
 )
@@ -84,6 +85,24 @@ func (s *Scheduler) Placeable(ctx context.Context, hostID string) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+// LastHeartbeat returns when the control plane last heard from a host and
+// whether the host is still in the inventory. The reconciler uses it to judge
+// how long an assigned host has been unreachable before presuming the servers it
+// was running are dead; an unknown host (ok=false) has effectively fallen off
+// the fleet entirely.
+func (s *Scheduler) LastHeartbeat(ctx context.Context, hostID string) (time.Time, bool, error) {
+	all, err := s.hosts.List(ctx)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	for _, h := range all {
+		if h.ID == hostID {
+			return h.LastHeartbeatAt, true, nil
+		}
+	}
+	return time.Time{}, false, nil
 }
 
 // CanEverFit reports whether any known host has enough *total* capacity to ever

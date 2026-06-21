@@ -37,6 +37,11 @@ const (
 	// hostHeartbeatTTL is how long a host may go without heartbeating before it
 	// is marked down.
 	hostHeartbeatTTL = 30 * time.Second
+	// hostDeadTTL is how long a running server's host may stay unreachable before
+	// the reconciler presumes its VM dead and reschedules. Longer than
+	// hostHeartbeatTTL so a brief agent restart (which marks the host down and
+	// back up within seconds) isn't mistaken for a permanent loss.
+	hostDeadTTL = 90 * time.Second
 	// worldGCInterval is how often the durable world store is swept for
 	// snapshots belonging to no live server (P5b).
 	worldGCInterval = time.Hour
@@ -119,7 +124,7 @@ func main() {
 	// never touches KVM itself).
 	sched := scheduler.New(hostRepo)
 	prov := provisioner.NewRemote(hub)
-	rec := reconciler.New(gameServerRepo, prov, sched, zlog)
+	rec := reconciler.New(gameServerRepo, prov, sched, hostDeadTTL, zlog)
 	go rec.Run(ctx, reconcileInterval)
 
 	// If a durable world store is configured, periodically GC snapshots that no
