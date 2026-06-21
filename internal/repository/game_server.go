@@ -257,8 +257,8 @@ func (r *GameServerRepository) UnassignHost(ctx context.Context, id string) erro
 func (r *GameServerRepository) MarkHealth(ctx context.Context, id string, reachable bool, online, max int) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
-		SET players_online = CASE WHEN $2 THEN $3 ELSE NULL END,
-		    players_max    = CASE WHEN $2 THEN $4 ELSE NULL END,
+		SET players_online = CASE WHEN $2 THEN $3::int ELSE NULL END,
+		    players_max    = CASE WHEN $2 THEN $4::int ELSE NULL END,
 		    last_seen      = CASE WHEN $2 THEN now() ELSE last_seen END
 		WHERE id = $1 AND deleted_at IS NULL AND status = 'running'`,
 		id, reachable, online, max)
