@@ -85,6 +85,29 @@ export interface ApiBillingSummary {
   hourly_rate: number
 }
 
+// ── Players / whitelist roster ───────────────────────────────────────────────
+
+export interface ApiPlayer {
+  id: string
+  owner_id: string
+  username: string
+  // The caller's servers this player may use.
+  server_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface CreatePlayerInput {
+  username: string
+  server_ids?: string[]
+}
+
+export interface UpdatePlayerInput {
+  username?: string
+  // When present, replaces the whole grant set (check/uncheck).
+  server_ids?: string[]
+}
+
 export type ApiDesiredState = "running" | "stopped" | "deleted"
 
 export type ApiStatus =
@@ -384,6 +407,23 @@ export const api = {
   // Admin-only: any user's pay-as-you-go bill.
   adminGetUserBilling(userId: string): Promise<ApiBillingSummary> {
     return request<ApiBillingSummary>(`/admin/users/${userId}/billing`)
+  },
+
+  // ── Players / whitelist (owner-scoped) ──
+  listPlayers(): Promise<ApiPlayer[]> {
+    return request<{ players: ApiPlayer[] | null }>("/players").then((r) => r.players ?? [])
+  },
+
+  createPlayer(input: CreatePlayerInput): Promise<ApiPlayer> {
+    return request<ApiPlayer>("/players", { method: "POST", body: JSON.stringify(input) })
+  },
+
+  updatePlayer(id: string, input: UpdatePlayerInput): Promise<ApiPlayer> {
+    return request<ApiPlayer>(`/players/${id}`, { method: "PATCH", body: JSON.stringify(input) })
+  },
+
+  async deletePlayer(id: string): Promise<void> {
+    await request<unknown>(`/players/${id}`, { method: "DELETE" })
   },
 
   // Registry index: the templates available to launch.

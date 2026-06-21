@@ -40,6 +40,7 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 	authHandler := NewAuthHandler(userRepo, refreshRepo, jwtManager, cfg.RefreshTTL)
 	adminHandler := NewAdminHandler(userRepo, gameServerRepo, hostRepo, logs)
 	quotaHandler := NewQuotaHandler(quotaRepo, gameServerRepo, userRepo)
+	playerHandler := NewPlayerHandler(repository.NewPlayerRepository(pool), gameServerRepo)
 	billingHandler := NewBillingHandler(billingRepo, userRepo, billing.Rates{
 		CPUHour:      cfg.Billing.CPUHour,
 		MemoryGBHour: cfg.Billing.MemoryGBHour,
@@ -90,6 +91,18 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 			servers.PATCH("/:id", serverHandler.Update)
 			servers.POST("/:id/snapshot", serverHandler.RequestBackup)
 			servers.DELETE("/:id", serverHandler.Delete)
+		}
+
+		// Whitelist roster (owner-scoped): players the caller may grant onto their
+		// servers.
+		players := api.Group("/players")
+		players.Use(middleware.Auth(jwtManager))
+		{
+			players.POST("", playerHandler.Create)
+			players.GET("", playerHandler.List)
+			players.GET("/:id", playerHandler.Get)
+			players.PATCH("/:id", playerHandler.Update)
+			players.DELETE("/:id", playerHandler.Delete)
 		}
 
 		// Template registry / marketplace (owner- and operator-accessible).
