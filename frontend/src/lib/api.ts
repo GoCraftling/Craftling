@@ -28,6 +28,63 @@ export interface ApiUser {
   created_at: string
 }
 
+// ── Quotas (P9) ──────────────────────────────────────────────────────────────
+
+// A user's effective resource quota. Each limit uses 0 to mean unlimited.
+// `custom` is false when the user is on the system default, true once an admin
+// has set a per-user override.
+export interface ApiQuota {
+  user_id: string
+  max_servers: number
+  max_cpus: number
+  max_memory_mb: number
+  custom: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+// A user's current committed allocation across their live servers.
+export interface ApiQuotaUsage {
+  servers: number
+  cpus: number
+  memory_mb: number
+}
+
+export interface ApiQuotaResponse {
+  quota: ApiQuota
+  usage: ApiQuotaUsage
+}
+
+export interface SetQuotaInput {
+  max_servers: number
+  max_cpus: number
+  max_memory_mb: number
+}
+
+// ── Billing (P9, pay-as-you-go hourly) ───────────────────────────────────────
+
+export interface ApiBillingItem {
+  server_id: string
+  name: string
+  cpus: number
+  memory_mb: number
+  hours: number
+  hourly_rate: number
+  cost: number
+  running: boolean
+}
+
+export interface ApiBillingSummary {
+  currency: string
+  period_start: string
+  cpu_hour: number
+  memory_gb_hour: number
+  items: ApiBillingItem[]
+  total_cost: number
+  // Live burn rate: the summed hourly price of everything currently running.
+  hourly_rate: number
+}
+
 export type ApiDesiredState = "running" | "stopped" | "deleted"
 
 export type ApiStatus =
@@ -294,6 +351,39 @@ export const api = {
   // Admin-only: every user.
   adminListUsers(): Promise<ApiUser[]> {
     return request<{ users: ApiUser[] | null }>("/admin/users").then((r) => r.users ?? [])
+  },
+
+  // The authenticated caller's own effective quota and current usage (P9).
+  myQuota(): Promise<ApiQuotaResponse> {
+    return request<ApiQuotaResponse>("/quota")
+  },
+
+  // Admin-only: any user's effective quota and usage.
+  adminGetUserQuota(userId: string): Promise<ApiQuotaResponse> {
+    return request<ApiQuotaResponse>(`/admin/users/${userId}/quota`)
+  },
+
+  // Admin-only: set (upsert) a user's quota override.
+  adminSetUserQuota(userId: string, input: SetQuotaInput): Promise<ApiQuotaResponse> {
+    return request<ApiQuotaResponse>(`/admin/users/${userId}/quota`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    })
+  },
+
+  // Admin-only: clear a user's override, reverting them to the system default.
+  adminDeleteUserQuota(userId: string): Promise<ApiQuotaResponse> {
+    return request<ApiQuotaResponse>(`/admin/users/${userId}/quota`, { method: "DELETE" })
+  },
+
+  // The authenticated caller's own pay-as-you-go bill for the current period.
+  myBilling(): Promise<ApiBillingSummary> {
+    return request<ApiBillingSummary>("/billing")
+  },
+
+  // Admin-only: any user's pay-as-you-go bill.
+  adminGetUserBilling(userId: string): Promise<ApiBillingSummary> {
+    return request<ApiBillingSummary>(`/admin/users/${userId}/billing`)
   },
 
   // Registry index: the templates available to launch.

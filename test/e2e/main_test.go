@@ -135,7 +135,8 @@ func TestMain(m *testing.M) {
 	// the hub (the control plane never touches a runtime directly).
 	recCtx, recCancel := context.WithCancel(ctx)
 	sched := scheduler.New(hostRepo)
-	rec := reconciler.New(gameServerRepo, prov, sched, 30*time.Second, zap.NewNop())
+	billingRepo := repository.NewBillingRepository(pool)
+	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, 30*time.Second, zap.NewNop())
 	go rec.Run(recCtx, 100*time.Millisecond)
 
 	// Bring up the always-on placement host as an in-process agent dialing the hub

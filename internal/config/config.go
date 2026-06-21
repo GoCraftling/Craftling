@@ -39,6 +39,13 @@ type Config struct {
 	AdminEmail    string
 	AdminPassword string
 
+	// Quota holds the system default per-user resource quota (P9), applied to
+	// any user without an admin-set override.
+	Quota QuotaConfig
+
+	// Billing holds the pay-as-you-go hourly price list (P9).
+	Billing BillingConfig
+
 	// Agent configuration (ModeAgent only). The host worker dials the control
 	// plane and holds a stream open over which the control plane pushes VM
 	// commands; the agent never exposes an inbound API.
@@ -51,6 +58,23 @@ const (
 	RuntimeFake        = "fake"
 	RuntimeFirecracker = "firecracker"
 )
+
+// QuotaConfig is the system default per-user quota (P9). Each limit uses 0 to
+// mean unlimited. A user with no admin-set override is held to these caps when
+// creating servers.
+type QuotaConfig struct {
+	MaxServers  int
+	MaxCPUs     int
+	MaxMemoryMB int
+}
+
+// BillingConfig is the pay-as-you-go price list (P9): the hourly charge per
+// vCPU and per GB of memory a running server accrues, in a single currency.
+type BillingConfig struct {
+	CPUHour      float64
+	MemoryGBHour float64
+	Currency     string
+}
 
 // AgentConfig holds the host-worker settings used when Mode == ModeAgent.
 type AgentConfig struct {
@@ -148,7 +172,7 @@ type FirecrackerConfig struct {
 	// RCONPort let the guest flush the workload via RCON
 	// before freezing its disk for a live snapshot. Empty password = freeze
 	// only (filesystem-consistent).
-	RCONPort     int
+	RCONPort int
 	// HealthInterval is how often the agent probes each running VM's deep health
 	// (P7: player count, liveness) over the vsock control channel. 0 uses the
 	// driver default.
@@ -184,6 +208,18 @@ func Load() *Config {
 
 		AdminEmail:    getEnv("ADMIN_EMAIL", ""),
 		AdminPassword: getEnv("ADMIN_PASSWORD", ""),
+
+		Quota: QuotaConfig{
+			MaxServers:  getIntEnv("QUOTA_MAX_SERVERS", 5),
+			MaxCPUs:     getIntEnv("QUOTA_MAX_CPUS", 16),
+			MaxMemoryMB: getIntEnv("QUOTA_MAX_MEMORY_MB", 16384),
+		},
+
+		Billing: BillingConfig{
+			CPUHour:      getFloatEnv("BILLING_CPU_HOUR", 0.012),
+			MemoryGBHour: getFloatEnv("BILLING_MEMORY_GB_HOUR", 0.006),
+			Currency:     getEnv("BILLING_CURRENCY", "USD"),
+		},
 
 		Agent: AgentConfig{
 			ControlPlaneGRPCAddr: getEnv("CONTROL_PLANE_GRPC_ADDR", "localhost:8090"),
@@ -267,6 +303,15 @@ func getIntEnv(key string, fallback int) int {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getFloatEnv(key string, fallback float64) float64 {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback
