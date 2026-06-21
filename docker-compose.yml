@@ -94,6 +94,7 @@ services:
       # the read-only squashfs rootfs, so the server can't even write eula.txt
       # and exits, halting the VM. Disk defaults to 4 GiB under FC_WORK_DIR/worlds.
       FC_WORLD_PERSIST: "true"
+      FC_WORLD_STORE_DIR: "/var/lib/craftling/worlds"
       # NIC the eBPF NAT dataplane attaches to. Setting it gives each server a
       # distinct public host port from the FC_HOST_PORT_MIN–FC_HOST_PORT_MAX
       # pool; without it every VM falls back to 25565 and servers on this host
@@ -103,6 +104,8 @@ services:
       # FC_VM_SUBNET: 10.222.0.0/16
       # FC_HOST_PORT_MIN: "30000"
       # FC_HOST_PORT_MAX: "40000"
+      FC_RCON_PORT: "25575"
+      FC_SNAPSHOT_INTERVAL: "25m"
     devices:
       # Mount KVM so Firecracker can boot microVMs.
       - "/dev/kvm:/dev/kvm"

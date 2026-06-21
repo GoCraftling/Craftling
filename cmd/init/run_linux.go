@@ -115,9 +115,11 @@ func run(logger *zap.Logger) {
 			zap.String("mountpoint", spec.Persist.Mountpoint))
 	}
 
-	// Start the snapshot control server so the host can take consistent live
-	// snapshots. Requires the world disk to be mounted (Persist), since it
-	// freezes that filesystem. Best-effort and non-blocking.
+	// Start the vsock control server so the host can probe the workload's deep
+	// health (P7) and take consistent live snapshots (P5c). Gated on the world
+	// disk being mounted (Persist) because the freeze path targets that
+	// filesystem; the host attaches the channel on every persistence VM, so
+	// health probing works even without a world store. Best-effort, non-blocking.
 	if spec.Quiesce != nil && spec.Persist != nil {
 		startSnapshotControl(logger, spec.Quiesce)
 	}

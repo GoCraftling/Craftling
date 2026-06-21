@@ -73,11 +73,11 @@ func New(cfg Config) (*Runtime, error) {
 		r.sweepWG.Add(1)
 		go r.snapshotSweep(cfg.SnapshotInterval)
 	}
-	// Deep-health probing (P7) rides the same vsock control channel as live
-	// snapshots, so it is available exactly when that channel is — on
-	// persistence+store hosts. The sweep caches each VM's health for Status to
-	// return without an inline probe.
-	if cfg.liveSnapshotEnabled() && cfg.HealthInterval > 0 {
+	// Deep-health probing (P7) rides the guest vsock control channel, which every
+	// persistence host attaches (a world store is not required — that only gates
+	// live snapshots). The sweep caches each VM's health for Status to return
+	// without an inline probe.
+	if cfg.persistEnabled() && cfg.HealthInterval > 0 {
 		r.sweepWG.Add(1)
 		go r.healthSweep(cfg.HealthInterval)
 	}
@@ -252,17 +252,20 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 		worldDisk = wd
 		rs.Persist = &runspec.PersistConfig{Device: worldDevice, Mountpoint: target}
 
-		// When a store is configured, enable live snapshots: the guest
-		// gets a Quiesce block (flush + freeze) and we attach a vsock
-		// device below so the host can drive it.
-		if r.cfg.liveSnapshotEnabled() {
-			q := &runspec.QuiesceConfig{}
-			if r.cfg.RCONPassword != "" {
-				q.RCONAddress = fmt.Sprintf("127.0.0.1:%d", r.cfg.RCONPort)
-				q.RCONPassword = r.cfg.RCONPassword
-			}
-			rs.Quiesce = q
+		// Attach the guest vsock control channel (and the matching device below).
+		// It carries two host-driven exchanges over the guest's loopback: the
+		// deep-health probe (P7 — Server List Ping / RCON list) and, when a world
+		// store is configured, the live-snapshot freeze/thaw (P5c). Health needs
+		// only the channel, so it is wired here for every persistence host rather
+		// than gated on a store — without it a host with no store reports no
+		// health at all. RCON credentials are filled in when configured; the ping
+		// probe works without them.
+		q := &runspec.QuiesceConfig{}
+		if r.cfg.RCONPassword != "" {
+			q.RCONAddress = fmt.Sprintf("127.0.0.1:%d", r.cfg.RCONPort)
+			q.RCONPassword = r.cfg.RCONPassword
 		}
+		rs.Quiesce = q
 	}
 
 	runSpec := &rs

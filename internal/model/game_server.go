@@ -76,10 +76,12 @@ type GameServer struct {
 	// the live player counts (nil when the workload isn't answering); LastSeen is
 	// the last time the process was successfully probed — proof the game itself,
 	// not just the VM, is up. All nil until a server is running and probed, and
-	// cleared when it stops or is lost.
-	PlayersOnline *int       `json:"players_online,omitempty"`
-	PlayersMax    *int       `json:"players_max,omitempty"`
-	LastSeen      *time.Time `json:"last_seen,omitempty"`
+	// cleared when it stops or is lost. These are always serialized (no
+	// omitempty) so the API contract is stable: a consumer always sees the keys,
+	// reading null as "not probed / unknown" rather than the field vanishing.
+	PlayersOnline *int       `json:"players_online"`
+	PlayersMax    *int       `json:"players_max"`
+	LastSeen      *time.Time `json:"last_seen"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
