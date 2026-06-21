@@ -26,6 +26,9 @@ func (c fakeCommander) Stop(ctx context.Context, _, vmID string) error {
 func (c fakeCommander) Snapshot(ctx context.Context, _, vmID string) error {
 	return c.rt.Snapshot(ctx, vmID)
 }
+func (c fakeCommander) SyncWhitelist(ctx context.Context, _, vmID string, usernames []string) error {
+	return c.rt.SyncWhitelist(ctx, vmID, usernames)
+}
 func (c fakeCommander) Evict(ctx context.Context, _, vmID string) error {
 	return c.rt.Evict(ctx, vmID)
 }
@@ -61,6 +64,11 @@ func (c errCommander) Stop(context.Context, string, string) error {
 func (c errCommander) Snapshot(context.Context, string, string) error {
 	c.t.Helper()
 	c.t.Fatal("Snapshot called, want no-op")
+	return nil
+}
+func (c errCommander) SyncWhitelist(context.Context, string, string, []string) error {
+	c.t.Helper()
+	c.t.Fatal("SyncWhitelist called, want no-op")
 	return nil
 }
 func (c errCommander) Evict(context.Context, string, string) error {

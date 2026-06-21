@@ -68,6 +68,10 @@ type Provisioner interface {
 	// running server into the durable store (P5). A no-op when the server has
 	// no backing VM (nothing live to capture).
 	Snapshot(ctx context.Context, s *model.GameServer) error
+	// SyncWhitelist reconciles a running server's in-game whitelist to the given
+	// set of player usernames, applied over RCON. A no-op when the server has no
+	// backing VM (nothing live to push to). Idempotent.
+	SyncWhitelist(ctx context.Context, s *model.GameServer, usernames []string) error
 	// Logs returns the server's captured console output from its backing VM (the
 	// last tailLines lines when tailLines > 0, all of it otherwise). A server
 	// with no backing VM has no logs, so it returns empty output and no error.
@@ -121,6 +125,10 @@ func (Fake) Deprovision(_ context.Context, _ *model.GameServer) error { return n
 
 // Snapshot is a no-op for the fake backend; there is no real world to capture.
 func (Fake) Snapshot(_ context.Context, _ *model.GameServer) error { return nil }
+
+// SyncWhitelist is a no-op for the fake backend; there is no real workload to
+// push a whitelist to.
+func (Fake) SyncWhitelist(_ context.Context, _ *model.GameServer, _ []string) error { return nil }
 
 // Logs returns synthetic console output for a server with a backing VM, or
 // empty output for one that was never provisioned, so the logs path can be

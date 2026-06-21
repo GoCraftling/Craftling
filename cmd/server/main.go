@@ -128,9 +128,11 @@ func main() {
 	// never touches KVM itself).
 	sched := scheduler.New(hostRepo)
 	// The billing meter records each server's running intervals for pay-as-you-go
-	// billing (P9); the reconciler opens/closes them on state transitions.
+	// billing (P9); the reconciler opens/closes them on state transitions. The
+	// player repo feeds each running server's whitelist over RCON.
 	billingRepo := repository.NewBillingRepository(pool)
-	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, hostDeadTTL, zlog)
+	playerRepo := repository.NewPlayerRepository(pool)
+	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, hostDeadTTL, zlog)
 	go rec.Run(ctx, reconcileInterval)
 
 	// If a durable world store is configured, periodically GC snapshots that no
