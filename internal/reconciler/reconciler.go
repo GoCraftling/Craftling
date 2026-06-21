@@ -115,12 +115,13 @@ func (r *Reconciler) start(ctx context.Context, s *model.GameServer) error {
 	if s.Status == model.StatusRunning {
 		return nil
 	}
-	// A server that already has a VM was provisioned before and merely stopped;
-	// resume it rather than creating a fresh one.
+	// A server that still has a VM (e.g. an interrupted provision, retried before
+	// it was torn down) is resumed in place rather than rebuilt from scratch.
 	provisioned := s.VMID != nil && *s.VMID != ""
-	// Place a not-yet-provisioned, unassigned server on a host before booting a
-	// new VM. A resumed VM already lives on its host; an already-assigned server
-	// keeps its reservation across a failed attempt, so neither re-schedules.
+	// Place an unassigned server on a host before booting a VM. A stopped server
+	// was unplaced on stop, so it re-schedules here and may land on a new host
+	// (its world rides the durable store). A mid-flight server that still has a
+	// VM or a host assignment keeps it across a retry, so neither re-schedules.
 	if !provisioned && s.HostID == nil {
 		if err := r.place(ctx, s); err != nil {
 			return err
@@ -181,10 +182,22 @@ func (r *Reconciler) stop(ctx context.Context, s *model.GameServer) error {
 	if err := r.servers.MarkStatus(ctx, s.ID, model.StatusStopping, ""); err != nil {
 		return err
 	}
-	// Halt the VM but keep it; the world and runtime details survive for a later
-	// start. Destruction only happens on delete.
+	// Halt the VM, snapshotting its world to the durable store.
 	if err := r.prov.Stop(ctx, s); err != nil {
 		return err
+	}
+	// Release the host: evict the VM's host-local footprint (keeping the durable
+	// world) and return its reservation, so a stopped server ties up no capacity
+	// and is free to reschedule onto any host when it next starts. The world
+	// rides the durable store, keyed by server id, so the restart restores it
+	// wherever it lands. NOTE: on a host with world persistence but no durable
+	// store, the world is host-local only, so a reschedule to a different host
+	// starts from an empty world — an accepted tradeoff for freeing capacity.
+	if err := r.prov.Evict(ctx, s); err != nil {
+		return err
+	}
+	if s.HostID != nil {
+		_ = r.sched.Release(ctx, *s.HostID, s.CPUs, s.MemoryMB)
 	}
 	r.log.Info("server stopped", zap.String("id", s.ID))
 	return r.servers.MarkStopped(ctx, s.ID)

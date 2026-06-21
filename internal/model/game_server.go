@@ -54,8 +54,9 @@ type GameServer struct {
 	Env        map[string]string `json:"env,omitempty"`
 
 	// HostID is the fleet host the scheduler placed this server on (P2). It is
-	// set before provisioning and persists across stop/start (the VM stays put);
-	// it is cleared only on delete. Nil until placed.
+	// set before provisioning and cleared on stop and on delete — a stopped
+	// server holds no host, so its next start re-runs placement and may land on a
+	// different host. Nil until placed.
 	HostID *string `json:"host_id,omitempty"`
 
 	// Runtime details, populated once provisioned.

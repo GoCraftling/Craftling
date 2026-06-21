@@ -87,7 +87,15 @@ type Runtime interface {
 	Start(ctx context.Context, vmID string) (*VM, error)
 	// Stop halts a VM without destroying it. Idempotent (missing VM is success).
 	Stop(ctx context.Context, vmID string) error
-	// Deprovision destroys a VM. Idempotent (missing VM is success).
+	// Evict destroys a VM and its host-local footprint (working dir, local world
+	// disk) while preserving the durable world snapshot, so the server can be
+	// rescheduled onto another host and restore its world there. It is the
+	// teardown half of releasing a stopped server from its host; Deprovision is
+	// the stronger form that also deletes the durable world. Idempotent (missing
+	// VM is success).
+	Evict(ctx context.Context, vmID string) error
+	// Deprovision destroys a VM, including its durable world. Idempotent (missing
+	// VM is success).
 	Deprovision(ctx context.Context, vmID string) error
 	// Status reports a VM's observed state, returning StateMissing for an
 	// unknown id rather than an error.
@@ -117,9 +125,10 @@ type FakeRuntime struct {
 	usedPorts map[int]struct{} // host ports currently bound by a live VM
 }
 
-// fakeVM is a simulated VM plus the host resources it holds. A provisioned VM
-// occupies its cpu/memory until it is deprovisioned, even while stopped —
-// mirroring a real host, where a halted VM keeps its slot.
+// fakeVM is a simulated VM plus the host resources it holds. A running VM
+// occupies its cpu/memory; stopping it frees that slot back to the host —
+// mirroring a real host that reclaims a halted VM's resources — so only running
+// VMs count against capacity.
 type fakeVM struct {
 	vm    *VM
 	cpus  int
@@ -187,11 +196,16 @@ func (r *FakeRuntime) allocatePortLocked() int {
 }
 
 // fitsLocked reports whether a VM needing cpus/memMB fits the host's remaining
-// capacity, returning ErrInsufficientCapacity if not. A zero total leaves that
+// capacity, returning ErrInsufficientCapacity if not. Only running VMs hold a
+// slot — a stopped VM frees its cpu/memory so the host can pack other work into
+// it, at the cost that restarting it may then fail. A zero total leaves that
 // dimension unconstrained. Caller holds r.mu.
 func (r *FakeRuntime) fitsLocked(cpus, memMB int) error {
 	var usedCPUs, usedMem int
 	for _, fv := range r.vms {
+		if fv.vm.State != StateRunning {
+			continue
+		}
 		usedCPUs += fv.cpus
 		usedMem += fv.memMB
 	}
@@ -204,7 +218,10 @@ func (r *FakeRuntime) fitsLocked(cpus, memMB int) error {
 	return nil
 }
 
-// Start boots an existing VM back to running.
+// Start boots an existing VM back to running, refusing to overcommit. Because a
+// stopped VM gave up its slot, the cpu/memory it needs may have been handed to
+// another VM while it was down, so a restart can fail with
+// ErrInsufficientCapacity. Restarting an already-running VM is a no-op.
 func (r *FakeRuntime) Start(_ context.Context, vmID string) (*VM, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -213,7 +230,12 @@ func (r *FakeRuntime) Start(_ context.Context, vmID string) (*VM, error) {
 	if !ok {
 		return nil, ErrVMNotFound
 	}
-	fv.vm.State = StateRunning
+	if fv.vm.State != StateRunning {
+		if err := r.fitsLocked(fv.cpus, fv.memMB); err != nil {
+			return nil, err
+		}
+		fv.vm.State = StateRunning
+	}
 	return clone(fv.vm), nil
 }
 
@@ -228,17 +250,35 @@ func (r *FakeRuntime) Stop(_ context.Context, vmID string) error {
 	return nil
 }
 
+// Evict destroys a VM, freeing its capacity and host port. The fake keeps no
+// durable world, so it is indistinguishable from Deprovision here; the
+// distinction (preserving the durable snapshot) only matters for the real
+// runtime. Unknown VM is a no-op.
+func (r *FakeRuntime) Evict(_ context.Context, vmID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.removeLocked(vmID)
+	return nil
+}
+
 // Deprovision destroys a VM, freeing its capacity and host port. Unknown VM is
 // a no-op.
 func (r *FakeRuntime) Deprovision(_ context.Context, vmID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.removeLocked(vmID)
+	return nil
+}
+
+// removeLocked drops a VM from the inventory and releases its host port. Caller
+// holds r.mu; an unknown VM is a no-op.
+func (r *FakeRuntime) removeLocked(vmID string) {
 	if fv, ok := r.vms[vmID]; ok {
 		delete(r.usedPorts, fv.vm.Port)
 		delete(r.vms, vmID)
 	}
-	return nil
 }
 
 // Status reports a VM's state, or a missing VM for an unknown id.

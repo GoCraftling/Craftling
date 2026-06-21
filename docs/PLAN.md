@@ -236,11 +236,14 @@ it is feature-complete for IPv4 TCP/UDP.)*
 - **Retry/backoff:** today a failed reconcile sets `status=error` and just relies
   on the 2s tick; replace with `attempts` + `next_attempt_at` (exponential
   backoff) and have `ListReconcilable` respect it.
-- **Host-failure reschedule:** the host reaper marks a host `down` but **nothing
-  reschedules its servers** — `host_id` is only cleared on delete. Add: on
-  sustained host-down, clear `host_id`/`vm_id` and re-place, **with fencing**
-  (generation token / ensure the old VM is gone) to avoid split-brain. P5's
-  store-mediated reschedule is the data half; this is the control half.
+- **Host-failure reschedule:** a *stop* now releases a server's host (clears
+  `host_id`, returns the reservation) so its next *start* re-places it on any
+  host — voluntary reschedule works. But the host reaper marks a dead host
+  `down` while **nothing reschedules the servers still desired-running on it**:
+  that involuntary path is the gap. Add: on sustained host-down, clear
+  `host_id`/`vm_id` and re-place, **with fencing** (generation token / ensure the
+  old VM is gone) to avoid split-brain. P5's store-mediated reschedule is the
+  data half; this is the control half.
 - **Draining:** `model.HostDraining` exists but is never entered or honored — wire
   a drain that blocks new placement and migrates servers off.
 - Optional leader election (advisory lock/lease) for multiple control-plane

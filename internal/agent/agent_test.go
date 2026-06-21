@@ -47,9 +47,39 @@ func TestFakeRuntimeLifecycle(t *testing.T) {
 	assertState(t, rt, vm.ID, StateMissing)
 }
 
+// TestFakeRuntimeEvict verifies Evict tears a VM down like Deprovision for the
+// fake (which holds no durable world), freeing its capacity and host port.
+func TestFakeRuntimeEvict(t *testing.T) {
+	ctx := context.Background()
+	rt := NewFakeRuntime("10.0.0.7", WithCapacity(4, 8192))
+
+	vm, err := rt.Provision(ctx, VMSpec{ServerID: "a", CPUs: 4, MemoryMB: 8192})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := rt.Evict(ctx, vm.ID); err != nil {
+		t.Fatalf("evict: %v", err)
+	}
+	assertState(t, rt, vm.ID, StateMissing)
+
+	// Capacity and the host port are freed: a fresh VM fits and reuses the port.
+	next, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192})
+	if err != nil {
+		t.Fatalf("provision after evict should fit: %v", err)
+	}
+	if next.Port != vm.Port {
+		t.Errorf("port after evict = %d, want freed port %d reused", next.Port, vm.Port)
+	}
+	// Evicting an unknown VM is a no-op.
+	if err := rt.Evict(ctx, "ghost"); err != nil {
+		t.Errorf("evict unknown = %v, want nil (idempotent)", err)
+	}
+}
+
 // TestFakeRuntimeRefusesOvercommit verifies a capacity-bounded host agent will
 // not boot a VM that would exceed its total: two 4/8192 servers cannot both run
-// on a single 4/8192 host. Deprovisioning the first frees the slot for another.
+// on a single 4/8192 host. Stopping the first frees its slot for another, and
+// restarting it back over that taken slot is itself refused.
 func TestFakeRuntimeRefusesOvercommit(t *testing.T) {
 	ctx := context.Background()
 	rt := NewFakeRuntime("10.0.0.7", WithCapacity(4, 8192))
@@ -61,19 +91,24 @@ func TestFakeRuntimeRefusesOvercommit(t *testing.T) {
 	if _, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192}); !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("second provision err = %v, want ErrInsufficientCapacity", err)
 	}
-	// A stopped VM keeps its slot, so it still cannot fit a second.
+	// A stopped VM frees its slot, so a second now fits.
 	if err := rt.Stop(ctx, first.ID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	if _, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192}); !errors.Is(err, ErrInsufficientCapacity) {
-		t.Fatalf("provision over a stopped VM err = %v, want ErrInsufficientCapacity", err)
+	second, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192})
+	if err != nil {
+		t.Fatalf("provision over a stopped VM should fit: %v", err)
 	}
-	// Deprovisioning frees the capacity.
-	if err := rt.Deprovision(ctx, first.ID); err != nil {
+	// Restarting the first back over the now-taken slot is refused.
+	if _, err := rt.Start(ctx, first.ID); !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("restart over a taken slot err = %v, want ErrInsufficientCapacity", err)
+	}
+	// Freeing the second's slot lets the first restart.
+	if err := rt.Deprovision(ctx, second.ID); err != nil {
 		t.Fatalf("deprovision: %v", err)
 	}
-	if _, err := rt.Provision(ctx, VMSpec{ServerID: "b", CPUs: 4, MemoryMB: 8192}); err != nil {
-		t.Fatalf("provision after deprovision should fit: %v", err)
+	if _, err := rt.Start(ctx, first.ID); err != nil {
+		t.Fatalf("restart after freeing capacity should fit: %v", err)
 	}
 }
 

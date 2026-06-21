@@ -173,11 +173,11 @@ func (r *GameServerRepository) SetDesiredState(ctx context.Context, id, desired 
 }
 
 // UsedCapacity returns the total cpu and memory currently committed to a host:
-// the sum over every live (non-deleted) server assigned to it. A server keeps
-// its reservation while stopped (the VM stays put), so this counts all assigned
-// servers regardless of status. It lets the control plane rebuild a host's
-// allocatable capacity from the durable record after a restart, instead of
-// resetting it to total and forgetting in-flight placements.
+// the sum over every live (non-deleted) server assigned to it. A stopped server
+// has its host_id cleared (see MarkStopped), so it drops out of this sum and
+// frees its reservation — only placed servers count. It lets the control plane
+// rebuild a host's allocatable capacity from the durable record after a restart,
+// instead of resetting it to total and forgetting in-flight placements.
 func (r *GameServerRepository) UsedCapacity(ctx context.Context, hostID string) (cpus, memoryMB int, err error) {
 	if hostID == "" {
 		return 0, 0, nil
@@ -219,12 +219,15 @@ func (r *GameServerRepository) MarkRunning(ctx context.Context, id, vmID, host s
 	return err
 }
 
-// MarkStopped records a stopped server with its runtime details cleared.
+// MarkStopped records a stopped server with its runtime details and host
+// assignment cleared. Clearing host_id releases the server's place in the fleet:
+// it no longer counts against its old host's capacity (see UsedCapacity), and
+// its next start re-runs placement, so a stopped server can resume on any host.
 func (r *GameServerRepository) MarkStopped(ctx context.Context, id string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
 		SET status = 'stopped', vm_id = NULL, host = NULL, port = NULL,
-		    status_message = NULL, updated_at = now()
+		    host_id = NULL, status_message = NULL, updated_at = now()
 		WHERE id = $1`,
 		id)
 	return err

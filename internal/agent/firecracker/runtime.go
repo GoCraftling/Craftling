@@ -298,15 +298,19 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 }
 
 // checkCapacity reports whether a VM needing cpus/memMB fits the host's
-// remaining capacity, returning agent.ErrInsufficientCapacity if not. A live VM
-// holds its slot whether running or stopped, so every tracked VM counts. A zero
-// configured total leaves that dimension unconstrained.
+// remaining capacity, returning agent.ErrInsufficientCapacity if not. Only a
+// running VM holds its slot — a stopped VM's process is gone, freeing its
+// cpu/memory for other work, at the cost that restarting it may then fail. A
+// zero configured total leaves that dimension unconstrained.
 func (r *Runtime) checkCapacity(cpus, memMB int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	var usedCPUs, usedMem int
 	for _, m := range r.vms {
+		if !m.running() {
+			continue
+		}
 		usedCPUs += m.vcpus
 		usedMem += m.memoryMB
 	}
@@ -330,6 +334,12 @@ func (r *Runtime) Start(ctx context.Context, vmID string) (*agent.VM, error) {
 	}
 	if m.running() {
 		return r.vmView(m), nil
+	}
+	// A stopped VM gave up its capacity slot, so restarting it must clear the
+	// host backstop again — the cpu/memory it needs may have been handed to
+	// another VM while it was down.
+	if err := r.checkCapacity(m.vcpus, m.memoryMB); err != nil {
+		return nil, err
 	}
 	if err := m.boot(ctx); err != nil {
 		return nil, fmt.Errorf("firecracker: restart vm: %w", err)
@@ -360,8 +370,25 @@ func (r *Runtime) Stop(ctx context.Context, vmID string) error {
 	return nil
 }
 
-// Deprovision force-stops a VM and removes its working directory (idempotent).
+// Evict force-stops a VM and removes its host-local footprint — working dir and
+// local world disk — but keeps the durable world snapshot, so the server can be
+// rescheduled onto another host and restore its world from the store there. It
+// backs releasing a stopped server from its host (idempotent).
+func (r *Runtime) Evict(_ context.Context, vmID string) error {
+	return r.teardown(vmID, false)
+}
+
+// Deprovision force-stops a VM and removes it entirely, including its durable
+// world snapshot — it is a server delete (idempotent).
 func (r *Runtime) Deprovision(_ context.Context, vmID string) error {
+	return r.teardown(vmID, true)
+}
+
+// teardown force-stops a VM and removes its host-local footprint. When
+// deleteWorld is set it also deletes the durable world snapshot (a server
+// delete); otherwise the durable copy is preserved so the world can be restored
+// after a reschedule. An unknown VM is a no-op.
+func (r *Runtime) teardown(vmID string, deleteWorld bool) error {
 	r.mu.Lock()
 	m, ok := r.vms[vmID]
 	if ok {
@@ -383,18 +410,17 @@ func (r *Runtime) Deprovision(_ context.Context, vmID string) error {
 		}
 		_ = deleteTAP(m.tapName)
 	}
-	// Destroy the world disk along with the VM. This is the point P5b will
-	// snapshot-then-upload before removing, so a deprovision becomes a safe
-	// teardown rather than data loss; for now destroy means destroy. Removing
-	// the keyed parent dir (DataDir/<key>) takes the disk with it.
+	// Remove the host-local world disk. Removing the keyed parent dir
+	// (DataDir/<key>) takes the disk with it. The durable copy in the store is
+	// the system of record across hosts; we delete it only on a true server
+	// delete, keeping it for a reschedule.
 	if m.worldDisk != "" {
 		if err := os.RemoveAll(filepath.Dir(m.worldDisk)); err != nil {
 			return fmt.Errorf("firecracker: remove world disk: %w", err)
 		}
-		// Delete the durable copy too: deprovision is a server delete, so the
-		// world is meant to be gone. Best-effort — an orphaned blob is harmless
-		// (a later GC can sweep it) and must not block teardown.
-		if r.store != nil {
+		if deleteWorld && r.store != nil {
+			// Best-effort — an orphaned blob is harmless (a later GC can sweep
+			// it) and must not block teardown.
 			_ = r.store.Delete(context.Background(), m.worldKey)
 		}
 	}

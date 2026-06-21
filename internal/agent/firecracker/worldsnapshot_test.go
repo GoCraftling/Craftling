@@ -137,3 +137,69 @@ func TestPrepareWorldDiskFreshWhenStoreEmpty(t *testing.T) {
 		t.Fatal("expected fresh-format fallback to invoke mkfs and fail")
 	}
 }
+
+// TestEvictPreservesDurableWorld verifies the teardown split: Evict removes a
+// VM's host-local footprint but keeps the durable world snapshot (so the server
+// can restore it after a reschedule), while Deprovision deletes the durable copy
+// too (a true server delete).
+func TestEvictPreservesDurableWorld(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.NewDirStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := newTestRuntime(t)
+	rt.store = store
+
+	// seed builds a durable snapshot for key and a tracked machine with a local
+	// world disk, returning the machine.
+	seed := func(id, key string) *machine {
+		if err := store.Put(ctx, key, bytes.NewReader([]byte("world-"+key))); err != nil {
+			t.Fatalf("seed durable %s: %v", key, err)
+		}
+		base := t.TempDir()
+		vmDir := filepath.Join(base, id)
+		worldDir := filepath.Join(base, "worlds", key)
+		for _, d := range []string{vmDir, worldDir} {
+			if err := os.MkdirAll(d, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}
+		disk := filepath.Join(worldDir, "world.ext4")
+		if err := os.WriteFile(disk, []byte("local-"+key), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		m := &machine{id: id, serverID: key, dir: vmDir, worldDisk: disk, worldKey: key}
+		rt.vms[id] = m
+		return m
+	}
+
+	gone := func(path string) bool {
+		_, err := os.Stat(path)
+		return os.IsNotExist(err)
+	}
+
+	// Evict: durable world survives, host-local footprint is gone.
+	mE := seed("vm-evict", "srv-evict")
+	if err := rt.Evict(ctx, mE.id); err != nil {
+		t.Fatalf("evict: %v", err)
+	}
+	if ok, _ := store.Exists(ctx, "srv-evict"); !ok {
+		t.Error("evict deleted the durable world; want preserved")
+	}
+	if !gone(mE.dir) || !gone(filepath.Dir(mE.worldDisk)) {
+		t.Error("evict left host-local footprint behind")
+	}
+	if _, ok := rt.vms[mE.id]; ok {
+		t.Error("evict left the machine tracked")
+	}
+
+	// Deprovision: durable world is deleted too.
+	mD := seed("vm-deprov", "srv-deprov")
+	if err := rt.Deprovision(ctx, mD.id); err != nil {
+		t.Fatalf("deprovision: %v", err)
+	}
+	if ok, _ := store.Exists(ctx, "srv-deprov"); ok {
+		t.Error("deprovision kept the durable world; want deleted")
+	}
+}

@@ -26,6 +26,9 @@ func (c fakeCommander) Stop(ctx context.Context, _, vmID string) error {
 func (c fakeCommander) Snapshot(ctx context.Context, _, vmID string) error {
 	return c.rt.Snapshot(ctx, vmID)
 }
+func (c fakeCommander) Evict(ctx context.Context, _, vmID string) error {
+	return c.rt.Evict(ctx, vmID)
+}
 func (c fakeCommander) Deprovision(ctx context.Context, _, vmID string) error {
 	return c.rt.Deprovision(ctx, vmID)
 }
@@ -55,6 +58,11 @@ func (c errCommander) Stop(context.Context, string, string) error {
 func (c errCommander) Snapshot(context.Context, string, string) error {
 	c.t.Helper()
 	c.t.Fatal("Snapshot called, want no-op")
+	return nil
+}
+func (c errCommander) Evict(context.Context, string, string) error {
+	c.t.Helper()
+	c.t.Fatal("Evict called, want no-op")
 	return nil
 }
 func (c errCommander) Deprovision(context.Context, string, string) error {
@@ -106,6 +114,12 @@ func TestRemoteProvisionerLifecycle(t *testing.T) {
 	}
 	assertRemoteState(t, p, s, StateRunning)
 
+	// Evict releases the VM from its host; the agent reports it gone.
+	if err := p.Evict(ctx, s); err != nil {
+		t.Fatalf("evict: %v", err)
+	}
+	assertRemoteState(t, p, s, StateMissing)
+
 	if err := p.Deprovision(ctx, s); err != nil {
 		t.Fatalf("deprovision: %v", err)
 	}
@@ -125,6 +139,9 @@ func TestRemoteProvisionerUnplaced(t *testing.T) {
 	// No host and no VM: nothing to tear down, and we must not send a command.
 	if err := p.Deprovision(ctx, &model.GameServer{ID: "x"}); err != nil {
 		t.Errorf("deprovision unplaced = %v, want nil", err)
+	}
+	if err := p.Evict(ctx, &model.GameServer{ID: "x"}); err != nil {
+		t.Errorf("evict unplaced = %v, want nil", err)
 	}
 	if err := p.Stop(ctx, &model.GameServer{ID: "x", HostID: ptr("h")}); err != nil {
 		t.Errorf("stop with no vm = %v, want nil", err)
