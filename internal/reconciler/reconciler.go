@@ -207,6 +207,18 @@ func (r *Reconciler) dropStalePlacement(ctx context.Context, s *model.GameServer
 	return nil
 }
 
+// hostReachable reports whether a server's assigned host is still a live member
+// of the fleet — i.e. a ready placement target the agent is connected to. It
+// lets a failed teardown distinguish "the host is gone, give up on the remote
+// call" from "the host is up but the op failed, retry". A server with no host
+// has nothing to reach.
+func (r *Reconciler) hostReachable(ctx context.Context, s *model.GameServer) (bool, error) {
+	if s.HostID == nil {
+		return false, nil
+	}
+	return r.sched.Placeable(ctx, *s.HostID)
+}
+
 // provisionOrStart resumes an existing VM or provisions a new one.
 func (r *Reconciler) provisionOrStart(ctx context.Context, s *model.GameServer, provisioned bool) (*provisioner.Instance, error) {
 	if provisioned {
@@ -250,7 +262,22 @@ func (r *Reconciler) delete(ctx context.Context, s *model.GameServer) error {
 		}
 	}
 	if err := r.prov.Deprovision(ctx, s); err != nil {
-		return err
+		// A delete is terminal user intent, so it must not be trapped by a host we
+		// can no longer reach. If the assigned host is gone — down, or its agent
+		// reconnected under a new id, orphaning the old one — its VM went with it
+		// (or is orphaned beyond reach), so there is nothing left to tear down:
+		// finalize the removal anyway. A failure on a still-live host is a real
+		// teardown error; surface it and retry rather than leak a running VM behind
+		// a "deleted" record.
+		reachable, perr := r.hostReachable(ctx, s)
+		if perr != nil {
+			return perr
+		}
+		if reachable {
+			return err
+		}
+		r.log.Warn("deprovision failed on unreachable host; finalizing delete anyway",
+			zap.String("id", s.ID), zap.Stringp("host_id", s.HostID), zap.Error(err))
 	}
 	// The VM is gone, so return its reserved capacity to the host.
 	if s.HostID != nil {
