@@ -10,7 +10,6 @@ export type Route =
   | "servers"
   | "marketplace"
   | "hosts"
-  | "scheduler"
   | "observability"
   | "quotas"
   | "settings"
@@ -29,7 +28,6 @@ export const NAV: { group: string; items: NavItem[] }[] = [
       { id: "servers", label: "Game Servers", icon: "cube", roles: ["operator", "owner"] },
       { id: "marketplace", label: "Marketplace", icon: "globe", roles: ["operator", "owner"] },
       { id: "hosts", label: "Host Fleet", icon: "hosts", roles: ["operator"] },
-      { id: "scheduler", label: "Scheduler", icon: "schedule", roles: ["operator"] },
     ],
   },
   {
@@ -137,7 +135,6 @@ function Topbar({
     servers: role === "owner" ? "My Servers" : "Game Servers",
     marketplace: "Marketplace",
     hosts: "Host Fleet",
-    scheduler: "Scheduler",
     observability: "Observability",
     quotas: "Quotas & Users",
     settings: "Settings",

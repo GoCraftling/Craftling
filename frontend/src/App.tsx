@@ -23,7 +23,7 @@ export function App() {
 
   // Owners can't reach operator-only views; bounce them back to servers.
   useEffect(() => {
-    if (role === "owner" && ["hosts", "scheduler", "quotas"].includes(route)) setRoute("servers")
+    if (role === "owner" && ["hosts", "quotas"].includes(route)) setRoute("servers")
   }, [role, route, setRoute])
 
   if (loading) {

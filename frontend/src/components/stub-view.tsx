@@ -3,12 +3,6 @@ import { Icon, type IconName } from "./icon"
 import type { Route } from "./app-shell"
 
 const STUBS: Record<string, { icon: IconName; phase: string; title: string; desc: string }> = {
-  scheduler: {
-    icon: "schedule",
-    phase: "P2",
-    title: "Scheduler",
-    desc: "Placement decisions: least-loaded host selection, atomic capacity reservation, and unschedulable retries.",
-  },
   observability: {
     icon: "activity",
     phase: "P7",
