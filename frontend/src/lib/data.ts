@@ -42,6 +42,9 @@ export interface Server {
   address: string | null
   port: number | null
   health: string
+  // ISO timestamp of the last successful deep-health probe (P7), or null if the
+  // game process has never been seen answering.
+  lastSeen: string | null
   statusMessage: string | null
   attempts: number
   createdDays: number

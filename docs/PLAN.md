@@ -221,15 +221,28 @@ it is feature-complete for IPv4 TCP/UDP.)*
   capacity has shrunk by the time the agent provisions, there is no rollback — the
   server retries next tick. Acceptable for now; revisit with P8 fencing.
 
-### P7 — Observability / deep health  ⏳ not started
+### P7 — Observability / deep health  🟡 RCON/ping done; metrics pending
 - **Goal:** know the *Minecraft process* is up, not just the VM.
-- Agent probes via RCON / Server List Ping → report `player_count`, `health`,
-  `last_seen` (new columns or a `server_health` table) up through the existing
-  `Status` seam.
-- Prometheus `/metrics` on control plane + agent (currently only `/healthz` that
-  always returns ok, and `/ping`); make `/healthz` a real readiness check (DB +
-  store). Surface `status_message`/health in API + frontend.
-- **Verify:** e2e asserts health transitions; scrape `/metrics`.
+- ✅ **Deep-health probing via RCON + Server List Ping.** The agent can't cleanly
+  reach a VM's service address (the NAT gateway is virtual, the TAP carries no
+  host IP), so it probes the guest *from inside*: a new `HEALTH` command rides the
+  existing P5c vsock control channel, and the in-VM init (`cmd/init`) proxies the
+  probe over loopback — `internal/minecraft` Server List Ping (no auth → version +
+  online/max) and, when RCON is configured, an authenticated `list` (authoritative
+  count). A periodic agent sweep (`FC_HEALTH_INTERVAL`, default 15s) caches each
+  VM's health on the machine; it surfaces through the existing `Status` seam
+  (`agent.VM.Health` → `provisioner.StatusReport.Health`), and the reconciler's
+  liveness pass persists it (throttled — telemetry, not a state transition) to
+  `game_servers.players_online/players_max/last_seen` (migration `00005`). The
+  counts + a relative "last seen" render in the servers view and detail drawer.
+  Probing rides the vsock channel, so it is live on persistence+store hosts (the
+  production path); a fake-runtime/MMDS-only host simply reports no health.
+- **Verify:** ✅ unit tests for the SLP + RCON protocol clients
+  (`internal/minecraft`) and the reconciler's health-write throttling; the
+  guest-side `HEALTH` handler + host probe are exercised under the KVM lane.
+- **Remaining (not done):** Prometheus `/metrics` on control plane + agent
+  (currently only `/healthz` that always returns ok, and `/ping`); make `/healthz`
+  a real readiness check (DB + store).
 
 ### P8 — Reliability  ⏳ not started
 - **Goal:** survive reconcile and host failures.
@@ -291,7 +304,7 @@ cross-cutting. Housekeeping is independent.
 | P4 | ✅ | `cmd/init` | `internal/agent/firecracker`, `internal/image`, `internal/squashfs`, `internal/runspec`, `internal/registry` | — |
 | P5 | ✅ | — | world disk + overlay; `internal/storage` (`DirStore` + `s3`); `internal/worldstore`; vsock quiesce; `reaper.Worlds` | world disk (host file) + snapshot (store blob); `game_servers.backup_requested/last_backup_at` (`00003`) |
 | P6 | ✅ | — | `firecracker/{nat,tap,tapfilter,netalloc}*`, `bpf/`, `cmd/init/net*` | host/port written back (existing cols) |
-| P7 | ⏳ | — | metrics, RCON/ping health probes | `server_health` / cols |
+| P7 | 🟡 | `cmd/init` (HEALTH proxy) | `internal/minecraft` (SLP+RCON), firecracker health sweep, vsock `HEALTH`; metrics pending | `game_servers.players_online/players_max/last_seen` (`00005`) |
 | P8 | ⏳ | — | backoff, host-failure reschedule + fencing, draining, leader election | `game_servers.attempts/next_attempt_at` |
 | P9 | ⏳ | — | quota enforcement | `user_quotas` |
 | P10 | ⏳ | — | agent auth, secret fail-fast, jailer/seccomp | per-host agent creds |

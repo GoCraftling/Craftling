@@ -150,6 +150,10 @@ type FirecrackerConfig struct {
 	// only (filesystem-consistent).
 	RCONPort     int
 	RCONPassword string
+	// HealthInterval is how often the agent probes each running VM's deep health
+	// (P7: player count, liveness) over the vsock control channel. 0 uses the
+	// driver default.
+	HealthInterval time.Duration
 }
 
 // S3StoreConfig configures an S3-compatible world store. It is a plain mirror of
@@ -217,6 +221,7 @@ func Load() *Config {
 				SnapshotInterval: getDurationEnv("FC_SNAPSHOT_INTERVAL", 0),
 				RCONPort:         getIntEnv("FC_RCON_PORT", 0),
 				RCONPassword:     getEnv("FC_RCON_PASSWORD", ""),
+				HealthInterval:   getDurationEnv("FC_HEALTH_INTERVAL", 0),
 			},
 			ID:            getEnv("AGENT_ID", ""),
 			Hostname:      getEnv("AGENT_HOSTNAME", defaultHostname()),

@@ -147,6 +147,11 @@ type Config struct {
 	// interval. Requires a WorldStore. 0 disables the periodic sweep (a live
 	// snapshot can still be taken on demand).
 	SnapshotInterval time.Duration
+	// HealthInterval is how often the agent probes each running VM's deep health
+	// (P7) over the vsock control channel and caches it for Status. Probing rides
+	// the same channel as live snapshots, so it applies only to persistence+store
+	// hosts. <= 0 defaults to DefaultHealthInterval; set explicitly to tune.
+	HealthInterval time.Duration
 	// RCONPort is the in-VM RCON port the guest flushes through before a live
 	// snapshot. Default DefaultRCONPort.
 	RCONPort int
@@ -190,6 +195,12 @@ const (
 	// DefaultRCONPort is the in-VM RCON port flushed before a live snapshot.
 	DefaultRCONPort = 25575
 )
+
+// DefaultHealthInterval is how often each running VM's deep health (P7) is
+// probed when HealthInterval is unset. Frequent enough that the player count and
+// liveness in the UI feel live, loose enough that a fleet of VMs isn't
+// continuously probed.
+const DefaultHealthInterval = 15 * time.Second
 
 // DefaultImagePullTimeout bounds a single image build (pull + flatten +
 // squashfs) when ImagePullTimeout is unset. Loose on purpose: a cold pull of a
@@ -283,6 +294,9 @@ func (c *Config) validatePersistence() error {
 	}
 	if c.RCONPort == 0 {
 		c.RCONPort = DefaultRCONPort
+	}
+	if c.HealthInterval <= 0 {
+		c.HealthInterval = DefaultHealthInterval
 	}
 	if c.Logger == nil {
 		c.Logger = zap.NewNop()

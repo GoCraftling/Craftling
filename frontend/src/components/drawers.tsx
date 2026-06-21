@@ -4,6 +4,7 @@ import { Icon } from "./icon"
 import { Btn, CopyBtn, StatusBadge } from "./primitives"
 import { SIZES, MAX_HOST_CPU, MAX_HOST_MEM } from "./servers-shared"
 import { api, ApiError } from "@/lib/api"
+import { fmtAgo } from "@/lib/utils"
 import {
   MC_VERSIONS,
   fmtMem,
@@ -350,7 +351,16 @@ export function ServerDrawer({
               )}
             </Row2>
             <Row2 k="Health (RCON)">
-              <span className="muted">—</span>
+              {s.status === "running" ? (
+                <span className="row gap-1" style={{ justifyContent: "flex-end" }}>
+                  <span>{s.health}</span>
+                  {s.lastSeen ? (
+                    <span className="muted">· seen {fmtAgo(s.lastSeen)}</span>
+                  ) : null}
+                </span>
+              ) : (
+                <span className="muted">—</span>
+              )}
             </Row2>
           </div>
 

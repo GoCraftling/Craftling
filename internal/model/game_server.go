@@ -71,6 +71,16 @@ type GameServer struct {
 	BackupRequested bool       `json:"backup_requested"`
 	LastBackupAt    *time.Time `json:"last_backup_at,omitempty"`
 
+	// Deep health (P7), populated by the reconciler from the agent's RCON / Server
+	// List Ping probe of the running game process. PlayersOnline/PlayersMax are
+	// the live player counts (nil when the workload isn't answering); LastSeen is
+	// the last time the process was successfully probed — proof the game itself,
+	// not just the VM, is up. All nil until a server is running and probed, and
+	// cleared when it stops or is lost.
+	PlayersOnline *int       `json:"players_online,omitempty"`
+	PlayersMax    *int       `json:"players_max,omitempty"`
+	LastSeen      *time.Time `json:"last_seen,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

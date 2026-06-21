@@ -122,20 +122,25 @@ func (p *RemoteProvisioner) Deprovision(ctx context.Context, s *model.GameServer
 	return p.cmd.Deprovision(ctx, *s.HostID, *s.VMID)
 }
 
-// Status reports the VM's observed state as seen by its host's agent.
-func (p *RemoteProvisioner) Status(ctx context.Context, s *model.GameServer) (State, error) {
+// Status reports the VM's observed state — and the workload's deep health when
+// the agent has probed it (P7) — as seen by its host's agent.
+func (p *RemoteProvisioner) Status(ctx context.Context, s *model.GameServer) (StatusReport, error) {
 	if s.VMID == nil || *s.VMID == "" {
-		return StateMissing, nil
+		return StatusReport{State: StateMissing}, nil
 	}
 	hostID, err := assignedHost(s)
 	if err != nil {
-		return "", err
+		return StatusReport{}, err
 	}
 	vm, err := p.cmd.Status(ctx, hostID, *s.VMID)
 	if err != nil {
-		return "", err
+		return StatusReport{}, err
 	}
-	return stateOf(vm), nil
+	report := StatusReport{State: stateOf(vm)}
+	if vm != nil {
+		report.Health = vm.Health
+	}
+	return report, nil
 }
 
 // Snapshot asks the assigned host's agent to take a live world snapshot. A

@@ -73,6 +73,14 @@ func New(cfg Config) (*Runtime, error) {
 		r.sweepWG.Add(1)
 		go r.snapshotSweep(cfg.SnapshotInterval)
 	}
+	// Deep-health probing (P7) rides the same vsock control channel as live
+	// snapshots, so it is available exactly when that channel is — on
+	// persistence+store hosts. The sweep caches each VM's health for Status to
+	// return without an inline probe.
+	if cfg.liveSnapshotEnabled() && cfg.HealthInterval > 0 {
+		r.sweepWG.Add(1)
+		go r.healthSweep(cfg.HealthInterval)
+	}
 
 	// Bring up the shared eBPF NAT dataplane once, here, when an uplink is
 	// configured. A failure is fatal: a half-networked host would boot VMs that
@@ -550,6 +558,7 @@ func (r *Runtime) vmView(m *machine) *agent.VM {
 		Host:     r.cfg.AdvertiseHost,
 		Port:     port,
 		State:    state,
+		Health:   m.getHealth(),
 	}
 }
 

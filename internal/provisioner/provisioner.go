@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/aarani/craftling-go/internal/model"
+	"github.com/aarani/craftling-go/internal/runspec"
 	"github.com/google/uuid"
 )
 
@@ -15,6 +16,16 @@ type Instance struct {
 	VMID string
 	Host string
 	Port int
+}
+
+// StatusReport is what Status observes about a backing VM: its lifecycle State
+// (always present) plus, for a running VM, the workload's deep Health (P7) when
+// the agent has a probe for it. Health is nil when the VM isn't running or the
+// agent hasn't probed it yet — the caller treats nil as "unknown", not
+// "unhealthy".
+type StatusReport struct {
+	State  State
+	Health *runspec.Health
 }
 
 // State is the observed lifecycle state of a backing instance, as reported by
@@ -50,8 +61,9 @@ type Provisioner interface {
 	// Deprovision tears down the backing VM, including its durable world. It must
 	// be idempotent.
 	Deprovision(ctx context.Context, s *model.GameServer) error
-	// Status reports the observed state of the backing VM.
-	Status(ctx context.Context, s *model.GameServer) (State, error)
+	// Status reports the observed state of the backing VM, and — for a running
+	// VM — the workload's deep health when available (P7).
+	Status(ctx context.Context, s *model.GameServer) (StatusReport, error)
 	// Snapshot takes an on-demand, application-consistent world snapshot of a
 	// running server into the durable store (P5). A no-op when the server has
 	// no backing VM (nothing live to capture).
@@ -122,9 +134,10 @@ func (Fake) Logs(_ context.Context, s *model.GameServer, _ int) ([]byte, error) 
 
 // Status infers state from the server's recorded VM id, since the fake holds no
 // real backend state: a server with a VM is running, otherwise it is missing.
-func (Fake) Status(_ context.Context, s *model.GameServer) (State, error) {
+// The fake reports no deep health (it runs no real workload to probe).
+func (Fake) Status(_ context.Context, s *model.GameServer) (StatusReport, error) {
 	if s.VMID != nil && *s.VMID != "" {
-		return StateRunning, nil
+		return StatusReport{State: StateRunning}, nil
 	}
-	return StateMissing, nil
+	return StatusReport{State: StateMissing}, nil
 }

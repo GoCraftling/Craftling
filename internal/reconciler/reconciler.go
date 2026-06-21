@@ -10,6 +10,7 @@ import (
 	"github.com/aarani/craftling-go/internal/model"
 	"github.com/aarani/craftling-go/internal/provisioner"
 	"github.com/aarani/craftling-go/internal/repository"
+	"github.com/aarani/craftling-go/internal/runspec"
 	"github.com/aarani/craftling-go/internal/scheduler"
 	"go.uber.org/zap"
 )
@@ -107,7 +108,7 @@ func (r *Reconciler) checkLiveness(ctx context.Context) {
 //     let start() reschedule onto a live host.
 func (r *Reconciler) checkServerLiveness(ctx context.Context, s *model.GameServer) {
 	probeCtx, cancel := context.WithTimeout(ctx, livenessProbeTimeout)
-	state, err := r.prov.Status(probeCtx, s)
+	report, err := r.prov.Status(probeCtx, s)
 	cancel()
 	if err != nil {
 		dead, derr := r.hostDeadTooLong(ctx, s)
@@ -123,12 +124,66 @@ func (r *Reconciler) checkServerLiveness(ctx context.Context, s *model.GameServe
 		r.markLost(ctx, s, "host unreachable; reprovisioning")
 		return
 	}
-	if state == provisioner.StateRunning {
+	if report.State == provisioner.StateRunning {
+		// The VM is alive; fold in the workload's deep health (player count,
+		// liveness) the agent probed, so the API and UI reflect the game process,
+		// not just the VM. Best-effort: a failed write is logged, never fatal.
+		r.recordHealth(ctx, s, report.Health)
 		return
 	}
 	r.log.Warn("running server has no live VM; reprovisioning",
-		zap.String("id", s.ID), zap.Stringp("vm_id", s.VMID), zap.String("observed", string(state)))
+		zap.String("id", s.ID), zap.Stringp("vm_id", s.VMID), zap.String("observed", string(report.State)))
 	r.markLost(ctx, s, "vm not found on host; reprovisioning")
+}
+
+// healthRefreshInterval bounds how often a still-running server's last_seen is
+// re-stamped when its player counts are unchanged. The liveness pass runs every
+// reconcile tick, but health is telemetry, not a state transition, so we throttle
+// the write: it lands when the counts change or when last_seen has gone stale,
+// not on every tick.
+const healthRefreshInterval = 10 * time.Second
+
+// recordHealth persists the workload's probed deep health onto the server, when
+// the agent reported any. It skips the write when nothing has changed since the
+// last reading (same counts and a still-fresh last_seen), so a stable server
+// isn't re-written every tick.
+func (r *Reconciler) recordHealth(ctx context.Context, s *model.GameServer, h *runspec.Health) {
+	if h == nil {
+		return
+	}
+	if !r.healthNeedsWrite(s, h) {
+		return
+	}
+	if err := r.servers.MarkHealth(ctx, s.ID, h.Reachable, h.PlayersOnline, h.PlayersMax); err != nil {
+		r.log.Warn("record server health", zap.String("id", s.ID), zap.Error(err))
+	}
+}
+
+// healthNeedsWrite reports whether a fresh probe differs enough from what is
+// already stored to be worth persisting: a changed reachability or player count,
+// or a reachable server whose last_seen has aged past healthRefreshInterval (so
+// proof-of-life keeps advancing even while the count holds steady).
+func (r *Reconciler) healthNeedsWrite(s *model.GameServer, h *runspec.Health) bool {
+	var online, max *int
+	if h.Reachable {
+		online, max = &h.PlayersOnline, &h.PlayersMax
+	}
+	if !eqIntPtr(s.PlayersOnline, online) || !eqIntPtr(s.PlayersMax, max) {
+		return true
+	}
+	if h.Reachable && (s.LastSeen == nil || time.Since(*s.LastSeen) >= healthRefreshInterval) {
+		return true
+	}
+	return false
+}
+
+// eqIntPtr reports whether two optional ints are equal (both nil, or both set to
+// the same value).
+func eqIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // hostDeadTooLong reports whether a server's assigned host has been unreachable

@@ -54,6 +54,11 @@ export interface ApiServer {
   host?: string | null
   port?: number | null
   status_message?: string | null
+  // Deep health (P7): live player counts and the last time the game process was
+  // probed answering. Null/absent until a running server is probed.
+  players_online?: number | null
+  players_max?: number | null
+  last_seen?: string | null
   created_at: string
   updated_at: string
 }
@@ -381,10 +386,18 @@ function daysSince(iso: string): number {
   return Math.max(0, Math.floor((Date.now() - t) / 86_400_000))
 }
 
-/** Map a backend GameServer to the view model the UI renders. Fields the
- *  control plane doesn't track yet (players, world size, RCON health) are left
- *  empty and shown as "—" downstream. */
+/** Map a backend GameServer to the view model the UI renders. Player counts and
+ *  health come from the agent's deep-health probe (P7); fields the control plane
+ *  doesn't track yet (world size) are left empty and shown as "—" downstream. */
 export function toServer(a: ApiServer): Server {
+  // health summarises the deep-health probe: a running server we've seen answering
+  // is "responsive"; one that's running but not yet (or no longer) answering is
+  // "no response"; anything else has no meaningful health to report.
+  const lastSeen = a.last_seen ?? null
+  let health = "—"
+  if (a.status === "running") {
+    health = lastSeen ? "responsive" : "no response"
+  }
   return {
     id: a.id,
     name: a.name,
@@ -395,11 +408,12 @@ export function toServer(a: ApiServer): Server {
     hostId: null,
     cpus: a.cpus,
     mem: a.memory_mb,
-    players: 0,
-    maxPlayers: 0,
+    players: a.players_online ?? 0,
+    maxPlayers: a.players_max ?? 0,
     address: a.host ?? null,
     port: a.port ?? null,
-    health: "—",
+    health,
+    lastSeen,
     statusMessage: a.status_message ?? null,
     attempts: 0,
     createdDays: daysSince(a.created_at),

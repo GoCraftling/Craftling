@@ -4,14 +4,27 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/aarani/craftling-go/internal/minecraft"
 	"github.com/aarani/craftling-go/internal/runspec"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
+
+// healthServiceAddr is the in-VM Minecraft service the health probe pings. The
+// workload always listens on the standard port inside its own network namespace,
+// so loopback is reachable regardless of the host's NAT dataplane.
+const healthServiceAddr = "127.0.0.1:25565"
+
+// healthProbeTimeout bounds each loopback probe (ping or rcon) the guest runs on
+// the host's behalf, so a wedged workload can't stall the control connection.
+const healthProbeTimeout = 4 * time.Second
 
 // In-VM snapshot control server (P5c). It listens on AF_VSOCK and, on the
 // host's request, makes the world disk safe to snapshot while the server keeps
@@ -112,6 +125,15 @@ func handleSnapshotConn(logger *zap.Logger, conn *os.File, q *runspec.QuiesceCon
 			resumeSnapshot(logger, q)
 			reply(conn, runspec.SnapOK)
 
+		case runspec.HealthProbe:
+			h := probeHealth(logger, q)
+			raw, err := json.Marshal(h)
+			if err != nil {
+				reply(conn, runspec.SnapErrPrefix+"marshal health: "+err.Error())
+				continue
+			}
+			reply(conn, runspec.SnapOK+" "+string(raw))
+
 		default:
 			reply(conn, runspec.SnapErrPrefix+"unknown command")
 		}
@@ -124,7 +146,7 @@ func handleSnapshotConn(logger *zap.Logger, conn *os.File, q *runspec.QuiesceCon
 // not — we still freeze for a filesystem-consistent snapshot rather than abort.
 func prepareSnapshot(logger *zap.Logger, q *runspec.QuiesceConfig) (int, error) {
 	if q != nil && q.RCONAddress != "" {
-		if err := rconExec(q.RCONAddress, q.RCONPassword, "save-off", "save-all flush"); err != nil {
+		if _, err := minecraft.RCONExec(q.RCONAddress, q.RCONPassword, 0, "save-off", "save-all flush"); err != nil {
 			logger.Warn("init: rcon flush before freeze failed; freezing anyway", zap.Error(err))
 		}
 	}
@@ -146,11 +168,47 @@ func prepareSnapshot(logger *zap.Logger, q *runspec.QuiesceConfig) (int, error) 
 // resumeSnapshot re-enables workload saves after a thaw (best-effort).
 func resumeSnapshot(logger *zap.Logger, q *runspec.QuiesceConfig) {
 	if q != nil && q.RCONAddress != "" {
-		if err := rconExec(q.RCONAddress, q.RCONPassword, "save-on"); err != nil {
+		if _, err := minecraft.RCONExec(q.RCONAddress, q.RCONPassword, 0, "save-on"); err != nil {
 			logger.Warn("init: rcon save-on after thaw failed", zap.Error(err))
 		}
 	}
 	logger.Info("init: world disk thawed")
+}
+
+// probeHealth runs the workload's deep-health probe on the host's behalf (P7),
+// over the guest's own loopback. It prefers a Server List Ping (no auth, reports
+// version + player counts), then — when RCON is configured — corroborates the
+// counts with an authenticated "list", whose tally is authoritative. A failure
+// of either probe is not fatal: an unreachable workload simply yields
+// Reachable=false, which the control plane records as "process not up yet".
+func probeHealth(logger *zap.Logger, q *runspec.QuiesceConfig) runspec.Health {
+	var h runspec.Health
+	ctx, cancel := context.WithTimeout(context.Background(), healthProbeTimeout)
+	defer cancel()
+
+	if st, err := minecraft.Ping(ctx, healthServiceAddr, healthProbeTimeout); err != nil {
+		logger.Debug("init: server list ping failed", zap.Error(err))
+	} else {
+		h.Reachable = true
+		h.Source = "ping"
+		h.Version = st.VersionName
+		h.PlayersOnline = st.PlayersOnline
+		h.PlayersMax = st.PlayersMax
+	}
+
+	if q != nil && q.RCONAddress != "" {
+		if bodies, err := minecraft.RCONExec(q.RCONAddress, q.RCONPassword, healthProbeTimeout, "list"); err != nil {
+			logger.Debug("init: rcon list failed", zap.Error(err))
+		} else if len(bodies) > 0 {
+			if online, max, ok := minecraft.ParsePlayerList(bodies[0]); ok {
+				h.Reachable = true
+				h.Source = "rcon"
+				h.PlayersOnline = online
+				h.PlayersMax = max
+			}
+		}
+	}
+	return h
 }
 
 // reply writes a single newline-terminated protocol line.

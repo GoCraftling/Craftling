@@ -254,7 +254,7 @@ func assertRemoteState(t *testing.T, p *RemoteProvisioner, s *model.GameServer, 
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if got != want {
-		t.Fatalf("state = %q, want %q", got, want)
+	if got.State != want {
+		t.Fatalf("state = %q, want %q", got.State, want)
 	}
 }

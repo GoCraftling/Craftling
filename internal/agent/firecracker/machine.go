@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -63,6 +64,27 @@ type machine struct {
 
 	cmd *exec.Cmd
 	api fcclient.ClientService
+
+	// healthMu guards health, the most recent deep-health probe of the workload
+	// (P7). The health sweep writes it; vmView reads it. Nil until the first
+	// successful probe — distinct from a probe that reported the workload
+	// unreachable (a non-nil Health with Reachable=false).
+	healthMu sync.Mutex
+	health   *runspec.Health
+}
+
+// setHealth stores the latest deep-health probe result.
+func (m *machine) setHealth(h *runspec.Health) {
+	m.healthMu.Lock()
+	m.health = h
+	m.healthMu.Unlock()
+}
+
+// getHealth returns the latest deep-health probe result, or nil if none yet.
+func (m *machine) getHealth() *runspec.Health {
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	return m.health
 }
 
 // socketTimeout bounds how long Provision/Start wait for Firecracker to create

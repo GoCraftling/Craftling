@@ -24,6 +24,7 @@ func NewGameServerRepository(pool *pgxpool.Pool) *GameServerRepository {
 const gameServerColumns = `id, owner_id, name, game, version, cpus, memory_mb,
 	desired_state, status, host_id, vm_id, host, port, status_message,
 	backup_requested, last_backup_at, template_id, image_ref, env,
+	players_online, players_max, last_seen,
 	created_at, updated_at`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows.
@@ -40,6 +41,7 @@ func scanGameServer(row scannable) (*model.GameServer, error) {
 		&s.ID, &s.OwnerID, &s.Name, &s.Game, &s.Version, &s.CPUs, &s.MemoryMB,
 		&s.DesiredState, &s.Status, &s.HostID, &s.VMID, &s.Host, &s.Port, &s.StatusMessage,
 		&s.BackupRequested, &s.LastBackupAt, &s.TemplateID, &s.ImageRef, &envJSON,
+		&s.PlayersOnline, &s.PlayersMax, &s.LastSeen,
 		&s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
@@ -146,7 +148,8 @@ func (r *GameServerRepository) ListRunning(ctx context.Context) ([]model.GameSer
 func (r *GameServerRepository) MarkLost(ctx context.Context, id, message string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
-		SET status = 'pending', vm_id = NULL, status_message = NULLIF($2, ''), updated_at = now()
+		SET status = 'pending', vm_id = NULL, status_message = NULLIF($2, ''),
+		    players_online = NULL, players_max = NULL, last_seen = NULL, updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL AND status = 'running'`,
 		id, message)
 	return err
@@ -245,6 +248,23 @@ func (r *GameServerRepository) UnassignHost(ctx context.Context, id string) erro
 	return err
 }
 
+// MarkHealth records a running server's probed deep health (P7): the live player
+// counts and a fresh last_seen when the workload answered (reachable), or NULL
+// counts (leaving last_seen untouched) when it did not. It deliberately does not
+// bump updated_at — health is high-frequency telemetry, not a state transition,
+// and the reconciler orders its work by updated_at. The status guard keeps it
+// from writing onto a server that has since stopped or been deleted.
+func (r *GameServerRepository) MarkHealth(ctx context.Context, id string, reachable bool, online, max int) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE game_servers
+		SET players_online = CASE WHEN $2 THEN $3 ELSE NULL END,
+		    players_max    = CASE WHEN $2 THEN $4 ELSE NULL END,
+		    last_seen      = CASE WHEN $2 THEN now() ELSE last_seen END
+		WHERE id = $1 AND deleted_at IS NULL AND status = 'running'`,
+		id, reachable, online, max)
+	return err
+}
+
 // MarkStatus sets the observed status and an optional message (empty -> NULL).
 func (r *GameServerRepository) MarkStatus(ctx context.Context, id, status, message string) error {
 	_, err := r.pool.Exec(ctx,
@@ -272,7 +292,8 @@ func (r *GameServerRepository) MarkStopped(ctx context.Context, id string) error
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
 		SET status = 'stopped', vm_id = NULL, host = NULL, port = NULL,
-		    host_id = NULL, status_message = NULL, updated_at = now()
+		    host_id = NULL, status_message = NULL,
+		    players_online = NULL, players_max = NULL, last_seen = NULL, updated_at = now()
 		WHERE id = $1`,
 		id)
 	return err
@@ -302,7 +323,8 @@ func (r *GameServerRepository) SoftDelete(ctx context.Context, id string) error 
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
 		SET status = 'deleted', host_id = NULL, vm_id = NULL, host = NULL, port = NULL,
-		    status_message = NULL, deleted_at = now(), updated_at = now()
+		    status_message = NULL, players_online = NULL, players_max = NULL, last_seen = NULL,
+		    deleted_at = now(), updated_at = now()
 		WHERE id = $1`,
 		id)
 	return err

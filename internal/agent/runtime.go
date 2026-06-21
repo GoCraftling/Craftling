@@ -74,6 +74,12 @@ type VM struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	State    string `json:"state"`
+
+	// Health is the workload's deep health (P7) — proof the game process inside a
+	// running VM is up and answering — as probed by the agent over the guest's
+	// loopback. Nil when the VM isn't running or hasn't been probed yet; the
+	// control plane treats a nil/absent value as "unknown, not unhealthy".
+	Health *runspec.Health `json:"health,omitempty"`
 }
 
 // Runtime performs the local VM lifecycle on a host. Implementations run real

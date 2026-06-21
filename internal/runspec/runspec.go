@@ -194,7 +194,34 @@ const (
 	SnapOK = "OK"
 	// SnapErrPrefix prefixes the guest's failure reply ("ERR <message>").
 	SnapErrPrefix = "ERR "
+	// HealthProbe asks the guest to probe the workload's deep health (P7) and
+	// reply "OK <json>" with a marshalled Health, or "ERR <message>". The guest
+	// proxies the probe over its loopback — Server List Ping and, when RCON is
+	// configured, an authenticated "list" — so the host never needs network reach
+	// into the VM.
+	HealthProbe = "HEALTH"
 )
+
+// Health is the deep-health of the workload inside a running VM (P7): proof the
+// game process itself is up and answering, not merely that the VM is alive. The
+// guest init produces it (proxying a probe over loopback) and the host carries it
+// back through the agent's VM Status. It is the wire contract between the two, so
+// it lives in this shared package.
+type Health struct {
+	// Reachable is true when at least one probe got a valid answer from the
+	// workload — the single most important signal (the process is serving).
+	Reachable bool `json:"reachable"`
+	// Source records which probe produced the counts: "ping" (Server List Ping)
+	// or "rcon" (authenticated "list", preferred when available).
+	Source string `json:"source,omitempty"`
+	// PlayersOnline / PlayersMax are the current and maximum player slots, valid
+	// only when Reachable.
+	PlayersOnline int `json:"players_online"`
+	PlayersMax    int `json:"players_max"`
+	// Version is the server version string the ping reported (e.g. "1.20.1"),
+	// best-effort.
+	Version string `json:"version,omitempty"`
+}
 
 // Argv returns the full command line (Entrypoint followed by Cmd).
 // Returns nil when both are empty — the init agent treats that as
