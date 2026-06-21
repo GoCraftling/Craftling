@@ -174,8 +174,12 @@ func TestGameServerLifecycle(t *testing.T) {
 	if running["host"] == nil || running["port"] == nil || running["vm_id"] == nil {
 		t.Errorf("running server missing runtime details: %v", running)
 	}
-	if running["port"].(float64) != 25565 {
-		t.Errorf("port = %v, want 25565", running["port"])
+	// The fake runtime hands each VM the lowest free host port at or above the
+	// standard Minecraft port, so a server sharing the suite's host gets 25565 or
+	// the next free port up — assert it is a valid pool port, not an exact value
+	// that depends on how many other VMs are live when this test runs.
+	if p, ok := running["port"].(float64); !ok || p < 25565 {
+		t.Errorf("port = %v, want a host port >= 25565", running["port"])
 	}
 
 	// Stop.
