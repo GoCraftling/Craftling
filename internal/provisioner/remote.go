@@ -24,6 +24,7 @@ type Commander interface {
 	Start(ctx context.Context, hostID, vmID string) (*agent.VM, error)
 	Stop(ctx context.Context, hostID, vmID string) error
 	Snapshot(ctx context.Context, hostID, vmID string) error
+	Evict(ctx context.Context, hostID, vmID string) error
 	Deprovision(ctx context.Context, hostID, vmID string) error
 	Status(ctx context.Context, hostID, vmID string) (*agent.VM, error)
 }
@@ -99,6 +100,16 @@ func (p *RemoteProvisioner) Stop(ctx context.Context, s *model.GameServer) error
 		return err
 	}
 	return p.cmd.Stop(ctx, hostID, *s.VMID)
+}
+
+// Evict releases the VM from its host while preserving the durable world, so the
+// server can be rescheduled elsewhere on its next start (idempotent). A server
+// with no backing VM has nothing to evict.
+func (p *RemoteProvisioner) Evict(ctx context.Context, s *model.GameServer) error {
+	if s.HostID == nil || *s.HostID == "" || s.VMID == nil || *s.VMID == "" {
+		return nil
+	}
+	return p.cmd.Evict(ctx, *s.HostID, *s.VMID)
 }
 
 // Deprovision tears down the VM on its host (idempotent). A server that was

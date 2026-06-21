@@ -21,6 +21,7 @@ const (
 	OpStart       = "start"
 	OpStop        = "stop"
 	OpSnapshot    = "snapshot"
+	OpEvict       = "evict"
 	OpDeprovision = "deprovision"
 	OpStatus      = "status"
 )
@@ -168,6 +169,8 @@ func execOp(ctx context.Context, rt Runtime, cmd *pb.Command) (payload []byte, e
 		return nil, errString(rt.Stop(ctx, vmRef(cmd)))
 	case OpSnapshot:
 		return nil, errString(rt.Snapshot(ctx, vmRef(cmd)))
+	case OpEvict:
+		return nil, errString(rt.Evict(ctx, vmRef(cmd)))
 	case OpDeprovision:
 		return nil, errString(rt.Deprovision(ctx, vmRef(cmd)))
 	case OpStatus:

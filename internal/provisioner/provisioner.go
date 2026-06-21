@@ -43,7 +43,12 @@ type Provisioner interface {
 	Start(ctx context.Context, s *model.GameServer) (*Instance, error)
 	// Stop halts the backing VM without destroying it. It must be idempotent.
 	Stop(ctx context.Context, s *model.GameServer) error
-	// Deprovision tears down the backing VM. It must be idempotent.
+	// Evict releases the backing VM from its host while preserving the durable
+	// world, so the server can be rescheduled onto another host on its next
+	// start. It must be idempotent.
+	Evict(ctx context.Context, s *model.GameServer) error
+	// Deprovision tears down the backing VM, including its durable world. It must
+	// be idempotent.
 	Deprovision(ctx context.Context, s *model.GameServer) error
 	// Status reports the observed state of the backing VM.
 	Status(ctx context.Context, s *model.GameServer) (State, error)
@@ -90,6 +95,10 @@ func (f Fake) Start(ctx context.Context, s *model.GameServer) (*Instance, error)
 
 // Stop is a no-op for the fake backend; the VM is considered halted but kept.
 func (Fake) Stop(_ context.Context, _ *model.GameServer) error { return nil }
+
+// Evict is a no-op for the fake backend; there is no host-local footprint to
+// release.
+func (Fake) Evict(_ context.Context, _ *model.GameServer) error { return nil }
 
 // Deprovision is a no-op for the fake backend.
 func (Fake) Deprovision(_ context.Context, _ *model.GameServer) error { return nil }

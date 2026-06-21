@@ -222,7 +222,14 @@ func (h *Hub) Snapshot(ctx context.Context, hostID, vmID string) error {
 	return err
 }
 
-// Deprovision asks the host's agent to destroy a VM.
+// Evict asks the host's agent to tear down a VM while preserving its durable
+// world, releasing the host so the server can be rescheduled elsewhere.
+func (h *Hub) Evict(ctx context.Context, hostID, vmID string) error {
+	_, err := h.call(ctx, hostID, agent.OpEvict, agent.VMRef{VMID: vmID})
+	return err
+}
+
+// Deprovision asks the host's agent to destroy a VM, including its durable world.
 func (h *Hub) Deprovision(ctx context.Context, hostID, vmID string) error {
 	_, err := h.call(ctx, hostID, agent.OpDeprovision, agent.VMRef{VMID: vmID})
 	return err
