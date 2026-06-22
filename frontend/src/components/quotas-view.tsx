@@ -239,7 +239,7 @@ function QuotaRow({
   onSaved: (next: Row) => void
   onError: (msg: string) => void
 }) {
-  const { user, quota, usage } = row
+  const { user, quota, usage, billing } = row
   return (
     <>
       <tr>
