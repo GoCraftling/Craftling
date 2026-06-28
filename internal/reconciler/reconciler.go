@@ -36,6 +36,18 @@ type WhitelistSource interface {
 	UsernamesForServer(ctx context.Context, serverID string) ([]string, error)
 }
 
+// FenceStore records and drains VMs orphaned on hosts the control plane could no
+// longer reach when it rescheduled their servers (P8b). The reconciler adds a
+// fence when it presumes a host dead, then evicts the orphan once the host is
+// reachable again. *repository.FenceRepository satisfies it. Optional: a nil store
+// disables orphan fencing.
+type FenceStore interface {
+	Add(ctx context.Context, f model.FencedVM) error
+	List(ctx context.Context) ([]model.FencedVM, error)
+	Delete(ctx context.Context, hostID, vmID string) error
+	DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
 // whitelistSyncInterval is how often the reconciler re-feeds every running
 // server's whitelist. The guest reconciles to the exact set (a steady-state push
 // is just one "whitelist list" read), so re-pushing on an interval is cheap and
@@ -49,6 +61,7 @@ type Reconciler struct {
 	sched     *scheduler.Scheduler
 	meter     Meter
 	whitelist WhitelistSource
+	fences    FenceStore
 	log       *zap.Logger
 	// hostDeadAfter is how long a running server's host may stay unreachable
 	// before the reconciler presumes the VM dead and reschedules. It must exceed
@@ -65,9 +78,9 @@ type Reconciler struct {
 // gets to come back before its VM is presumed dead (see Reconciler.hostDeadAfter).
 // backoffBase/backoffMax bound the exponential retry backoff on a failed reconcile.
 // meter may be nil to disable billing metering; whitelist may be nil to disable
-// in-game whitelist sync.
-func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, whitelist WhitelistSource, hostDeadAfter, backoffBase, backoffMax time.Duration, log *zap.Logger) *Reconciler {
-	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, whitelist: whitelist, hostDeadAfter: hostDeadAfter, backoffBase: backoffBase, backoffMax: backoffMax, log: log}
+// in-game whitelist sync; fences may be nil to disable orphan fencing (P8b).
+func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, whitelist WhitelistSource, fences FenceStore, hostDeadAfter, backoffBase, backoffMax time.Duration, log *zap.Logger) *Reconciler {
+	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, whitelist: whitelist, fences: fences, hostDeadAfter: hostDeadAfter, backoffBase: backoffBase, backoffMax: backoffMax, log: log}
 }
 
 // startBilling opens a server's metered running interval (best-effort: a billing
@@ -165,6 +178,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	// place a VM that died under us gets noticed and dropped back to pending.
 	r.checkLiveness(ctx)
 
+	// Reclaim VMs orphaned on hosts that have since come back (P8b fencing).
+	r.reconcileFences(ctx)
+
 	servers, err := r.servers.ListReconcilable(ctx)
 	if err != nil {
 		r.log.Error("list reconcilable servers", zap.Error(err))
@@ -257,6 +273,14 @@ func (r *Reconciler) checkServerLiveness(ctx context.Context, s *model.GameServe
 		}
 		r.log.Warn("running server's host unreachable past grace; reprovisioning",
 			zap.String("id", s.ID), zap.Stringp("host_id", s.HostID), zap.Error(err))
+		// The host is unreachable, not confirmed dead: its agent may still be
+		// running the VM behind a partition. Fence the abandoned VM so that, once
+		// the host comes back, the reconciler evicts the orphan rather than leaving
+		// a zombie that could keep snapshotting the world the reschedule now owns
+		// (the generation guard already blocks those writes; this reclaims it). The
+		// world-store key is reassigned to the new incarnation, so the fence drains
+		// via Evict, which never touches the durable world.
+		r.recordFence(ctx, s)
 		r.markLost(ctx, s, "host unreachable; reprovisioning")
 		return
 	}
@@ -338,6 +362,70 @@ func (r *Reconciler) hostDeadTooLong(ctx context.Context, s *model.GameServer) (
 		return true, nil
 	}
 	return time.Since(last) > r.hostDeadAfter, nil
+}
+
+// fenceGCAfter is how long an undrained fence is kept before it is GC'd: a host
+// down this long is presumed gone for good (its VM unreachable forever and its
+// world long since superseded), so the fence is dead weight.
+const fenceGCAfter = 24 * time.Hour
+
+// recordFence persists a fence for the VM a server is abandoning on an unreachable
+// host (P8b), so the reconciler can evict the orphan once the host returns. A
+// no-op when fencing is disabled or the server has no host/VM to abandon. A write
+// failure is logged, not propagated: the markLost reschedule must still proceed
+// (the generation guard already protects the world), and the fence is best-effort
+// resource reclaim.
+func (r *Reconciler) recordFence(ctx context.Context, s *model.GameServer) {
+	if r.fences == nil || s.HostID == nil || *s.HostID == "" || s.VMID == nil || *s.VMID == "" {
+		return
+	}
+	f := model.FencedVM{ServerID: s.ID, HostID: *s.HostID, VMID: *s.VMID, Generation: s.Generation}
+	if err := r.fences.Add(ctx, f); err != nil {
+		r.log.Error("record fence", zap.String("id", s.ID), zap.String("vm_id", *s.VMID), zap.Error(err))
+	}
+}
+
+// reconcileFences drains outstanding orphan fences (P8b). For each fenced VM whose
+// host has become reachable again — the partition healed and the agent reconnected
+// — it evicts the orphan (reclaiming its resources while preserving the durable
+// world the new incarnation now owns) and clears the fence. Fences for hosts still
+// unreachable are left for a later tick; ones older than fenceGCAfter are swept,
+// since a host gone that long won't return. Best-effort throughout: a failure is
+// logged and retried next tick.
+func (r *Reconciler) reconcileFences(ctx context.Context) {
+	if r.fences == nil {
+		return
+	}
+	if _, err := r.fences.DeleteOlderThan(ctx, time.Now().Add(-fenceGCAfter)); err != nil {
+		r.log.Warn("gc stale fences", zap.Error(err))
+	}
+	fences, err := r.fences.List(ctx)
+	if err != nil {
+		r.log.Error("list fences", zap.Error(err))
+		return
+	}
+	for i := range fences {
+		f := &fences[i]
+		reachable, err := r.sched.Placeable(ctx, f.HostID)
+		if err != nil {
+			r.log.Error("fence: host check", zap.String("host_id", f.HostID), zap.Error(err))
+			continue
+		}
+		if !reachable {
+			continue // host still gone; keep the fence until it returns or ages out
+		}
+		if err := r.prov.EvictVM(ctx, f.HostID, f.VMID); err != nil {
+			r.log.Warn("fence: evict orphan vm", zap.String("host_id", f.HostID),
+				zap.String("vm_id", f.VMID), zap.Error(err))
+			continue // leave the fence; retry next tick
+		}
+		if err := r.fences.Delete(ctx, f.HostID, f.VMID); err != nil {
+			r.log.Error("fence: clear", zap.String("host_id", f.HostID), zap.String("vm_id", f.VMID), zap.Error(err))
+			continue
+		}
+		r.log.Info("fenced orphan VM evicted",
+			zap.String("server_id", f.ServerID), zap.String("host_id", f.HostID), zap.String("vm_id", f.VMID))
+	}
 }
 
 // markLost drops a presumed-dead running server back to pending for re-provision,
@@ -431,6 +519,17 @@ func (r *Reconciler) start(ctx context.Context, s *model.GameServer) error {
 	}
 	if err := r.servers.MarkStatus(ctx, s.ID, model.StatusProvisioning, ""); err != nil {
 		return err
+	}
+	// A fresh provision is a new VM incarnation: bump the generation fencing token
+	// (P8b) so it strictly exceeds any prior incarnation's. The token rides down in
+	// the VMSpec and the agent stamps it onto the durable world write, fencing out a
+	// superseded zombie. A resume keeps the existing generation (same incarnation).
+	if !provisioned {
+		gen, err := r.servers.NextGeneration(ctx, s.ID)
+		if err != nil {
+			return err
+		}
+		s.Generation = gen
 	}
 	inst, err := r.provisionOrStart(ctx, s, provisioned)
 	if err != nil {

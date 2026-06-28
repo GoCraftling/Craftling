@@ -69,7 +69,7 @@ func (r *Runtime) snapshotRunning(ctx context.Context, m *machine) error {
 	}
 	defer func() { _ = os.Remove(tmp) }()
 
-	if err := putGzFile(ctx, r.store, m.worldKey, tmp); err != nil {
+	if err := putGzFile(ctx, r.store, m.worldKey, m.generation, tmp); err != nil {
 		return fmt.Errorf("firecracker: upload snapshot: %w", err)
 	}
 	return nil

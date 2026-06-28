@@ -147,7 +147,8 @@ func TestMain(m *testing.M) {
 	sched := scheduler.New(hostRepo)
 	billingRepo := repository.NewBillingRepository(pool)
 	playerRepo := repository.NewPlayerRepository(pool)
-	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, 30*time.Second, 100*time.Millisecond, time.Second, zap.NewNop())
+	fenceRepo := repository.NewFenceRepository(pool)
+	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, fenceRepo, 30*time.Second, 100*time.Millisecond, time.Second, zap.NewNop())
 	go rec.Run(recCtx, 100*time.Millisecond)
 
 	// Bring up the always-on placement host as an in-process agent dialing the hub

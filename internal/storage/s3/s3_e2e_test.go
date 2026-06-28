@@ -76,7 +76,7 @@ func TestS3StoreRoundTrip(t *testing.T) {
 	}
 
 	payload := bytes.Repeat([]byte("world-snapshot-bytes;"), 1000)
-	if err := store.Put(ctx, id, bytes.NewReader(payload)); err != nil {
+	if err := store.Put(ctx, id, 1, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if ok, err := store.Exists(ctx, id); err != nil || !ok {
@@ -97,7 +97,7 @@ func TestS3StoreRoundTrip(t *testing.T) {
 	}
 
 	// Replace, then verify the new content.
-	if err := store.Put(ctx, id, strings.NewReader("newer")); err != nil {
+	if err := store.Put(ctx, id, 1, strings.NewReader("newer")); err != nil {
 		t.Fatalf("Put replace: %v", err)
 	}
 	rc, _ = store.Get(ctx, id)
@@ -105,6 +105,24 @@ func TestS3StoreRoundTrip(t *testing.T) {
 	_ = rc.Close()
 	if string(got) != "newer" {
 		t.Errorf("after replace = %q, want newer", got)
+	}
+
+	// Generation fence (P8b): claim a higher generation, then a stale Put is
+	// rejected without changing the stored world, while the current one still writes.
+	if err := store.Claim(ctx, id, 5); err != nil {
+		t.Fatalf("Claim gen5: %v", err)
+	}
+	if err := store.Put(ctx, id, 4, strings.NewReader("stale")); !errors.Is(err, storage.ErrStaleGeneration) {
+		t.Fatalf("Put gen4 after claim 5 = %v; want ErrStaleGeneration", err)
+	}
+	rc, _ = store.Get(ctx, id)
+	got, _ = io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "newer" {
+		t.Errorf("stale Put changed the world: got %q, want newer", got)
+	}
+	if err := store.Put(ctx, id, 5, strings.NewReader("gen5")); err != nil {
+		t.Fatalf("Put gen5: %v", err)
 	}
 
 	if err := store.Delete(ctx, id); err != nil {

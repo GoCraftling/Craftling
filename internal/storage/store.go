@@ -28,10 +28,23 @@ import (
 // backends so their naming can't drift.
 const WorldSuffix = ".world"
 
+// GenSuffix names the per-server generation watermark that sits beside a
+// snapshot. The watermark is the highest VM incarnation (generation token) that
+// has claimed or written this server's world; the store rejects any Put/Claim
+// from a lower generation so a partitioned host's zombie VM (P8b) cannot clobber
+// the world a rescheduled, higher-generation VM now owns.
+const GenSuffix = ".gen"
+
 // ErrWorldNotFound is returned by Get when no snapshot is stored for a server.
 // Callers use it to distinguish "this server has no saved world yet" (boot a
 // fresh disk) from a real I/O failure.
 var ErrWorldNotFound = errors.New("storage: world not found")
+
+// ErrStaleGeneration is returned by Put/Claim when the caller's generation is
+// older than the watermark already recorded for the server — i.e. a newer VM
+// incarnation has superseded this one. The caller (the agent's snapshot path)
+// treats it as "my write was correctly fenced out", not a fault.
+var ErrStaleGeneration = errors.New("storage: stale generation")
 
 // WorldStore is the durable store of per-server world snapshots. A snapshot is
 // an opaque byte stream the agent produces from a world disk; the store keys it
@@ -45,16 +58,25 @@ type WorldStore interface {
 	Exists(ctx context.Context, serverID string) (bool, error)
 
 	// Put stores (replacing any prior) the snapshot for serverID, reading the
-	// stream to EOF. A failure must not leave a partial snapshot a later Get
-	// would hand back as if whole.
-	Put(ctx context.Context, serverID string, r io.Reader) error
+	// stream to EOF, and raises the server's generation watermark to generation.
+	// A failure must not leave a partial snapshot a later Get would hand back as
+	// if whole. Returns ErrStaleGeneration — without writing — when generation is
+	// older than the recorded watermark, fencing a superseded VM's write out.
+	Put(ctx context.Context, serverID string, generation int64, r io.Reader) error
+
+	// Claim raises the server's generation watermark to generation without writing
+	// a snapshot. The agent calls it when a fresh VM restores/boots a world, so the
+	// new incarnation fences out any lower-generation zombie before it ever
+	// snapshots. Returns ErrStaleGeneration when generation is older than the
+	// recorded watermark (a downgrade, which must not happen for a live VM).
+	Claim(ctx context.Context, serverID string, generation int64) error
 
 	// Get opens the stored snapshot for serverID. The caller closes the
 	// returned reader. Returns ErrWorldNotFound when nothing is stored.
 	Get(ctx context.Context, serverID string) (io.ReadCloser, error)
 
-	// Delete removes the snapshot for serverID. A missing snapshot is not an
-	// error — delete is idempotent teardown.
+	// Delete removes the snapshot for serverID (and its generation watermark). A
+	// missing snapshot is not an error — delete is idempotent teardown.
 	Delete(ctx context.Context, serverID string) error
 
 	// List returns the keys of all stored snapshots. Each key is a SafeKey'd

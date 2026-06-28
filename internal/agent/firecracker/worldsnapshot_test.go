@@ -28,7 +28,7 @@ func TestWorldSnapshotRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := snapshotWorldDisk(ctx, store, "srv-1", src); err != nil {
+	if err := snapshotWorldDisk(ctx, store, "srv-1", 1, src); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
@@ -65,7 +65,7 @@ func TestGzipDiskToFileRoundTrip(t *testing.T) {
 	if err := gzipDiskToFile(src, gz); err != nil {
 		t.Fatalf("gzipDiskToFile: %v", err)
 	}
-	if err := putGzFile(ctx, store, "srv-1", gz); err != nil {
+	if err := putGzFile(ctx, store, "srv-1", 1, gz); err != nil {
 		t.Fatalf("putGzFile: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestPrepareWorldDiskRestoresFromStore(t *testing.T) {
 	if err := os.WriteFile(seed, []byte(sentinel), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshotWorldDisk(ctx, store, "srv-1", seed); err != nil {
+	if err := snapshotWorldDisk(ctx, store, "srv-1", 1, seed); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,7 +106,7 @@ func TestPrepareWorldDiskRestoresFromStore(t *testing.T) {
 	rt.cfg.MkfsExt4Path = "/nonexistent/mkfs.ext4" // must NOT be invoked on the restore path
 
 	disk := filepath.Join(t.TempDir(), "srv", "world.ext4")
-	if err := rt.prepareWorldDisk(ctx, "srv-1", disk); err != nil {
+	if err := rt.prepareWorldDisk(ctx, "srv-1", 1, disk); err != nil {
 		t.Fatalf("prepareWorldDisk: %v", err)
 	}
 	got, err := os.ReadFile(disk)
@@ -133,7 +133,7 @@ func TestPrepareWorldDiskFreshWhenStoreEmpty(t *testing.T) {
 	rt.cfg.MkfsExt4Path = "/nonexistent/mkfs.ext4"
 
 	disk := filepath.Join(t.TempDir(), "srv", "world.ext4")
-	if err := rt.prepareWorldDisk(ctx, "srv-1", disk); err == nil {
+	if err := rt.prepareWorldDisk(ctx, "srv-1", 1, disk); err == nil {
 		t.Fatal("expected fresh-format fallback to invoke mkfs and fail")
 	}
 }
@@ -154,7 +154,7 @@ func TestEvictPreservesDurableWorld(t *testing.T) {
 	// seed builds a durable snapshot for key and a tracked machine with a local
 	// world disk, returning the machine.
 	seed := func(id, key string) *machine {
-		if err := store.Put(ctx, key, bytes.NewReader([]byte("world-"+key))); err != nil {
+		if err := store.Put(ctx, key, 1, bytes.NewReader([]byte("world-"+key))); err != nil {
 			t.Fatalf("seed durable %s: %v", key, err)
 		}
 		base := t.TempDir()

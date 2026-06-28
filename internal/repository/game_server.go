@@ -248,6 +248,20 @@ func (r *GameServerRepository) OwnerUsage(ctx context.Context, ownerID string) (
 	return u, err
 }
 
+// NextGeneration atomically bumps and returns a server's incarnation counter
+// (P8b). The reconciler calls it just before provisioning a fresh VM so each new
+// incarnation carries a strictly higher fencing token than any it supersedes; the
+// token rides down to the agent and is stamped onto the durable world write, so a
+// partitioned host's zombie VM (an older generation) is fenced out of the world
+// the new VM now owns.
+func (r *GameServerRepository) NextGeneration(ctx context.Context, id string) (int64, error) {
+	var gen int64
+	err := r.pool.QueryRow(ctx,
+		`UPDATE game_servers SET generation = generation + 1, updated_at = now()
+		 WHERE id = $1 RETURNING generation`, id).Scan(&gen)
+	return gen, err
+}
+
 // AssignHost records the fleet host the scheduler placed a server on (P2). The
 // capacity reservation itself lives in the host inventory; this persists the
 // assignment so it survives a reconciler restart and is visible in the API.

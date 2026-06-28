@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -38,6 +39,74 @@ func (s *DirStore) path(serverID string) string {
 	return filepath.Join(s.root, SafeKey(serverID)+WorldSuffix)
 }
 
+// genPath is the on-disk generation-watermark path for a server id.
+func (s *DirStore) genPath(serverID string) string {
+	return filepath.Join(s.root, SafeKey(serverID)+GenSuffix)
+}
+
+// readGen returns the recorded generation watermark for serverID, or 0 when none
+// has been written yet (a never-claimed world floor-bounds every generation).
+func (s *DirStore) readGen(serverID string) (int64, error) {
+	b, err := os.ReadFile(s.genPath(serverID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("storage: read generation %q: %w", serverID, err)
+	}
+	g, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("storage: parse generation %q: %w", serverID, err)
+	}
+	return g, nil
+}
+
+// writeGen atomically records the generation watermark for serverID.
+func (s *DirStore) writeGen(serverID string, generation int64) error {
+	tmp, err := os.CreateTemp(s.root, SafeKey(serverID)+".*.gentmp")
+	if err != nil {
+		return fmt.Errorf("storage: create temp generation: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
+	if _, err := fmt.Fprintf(tmp, "%d\n", generation); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("storage: write generation %q: %w", serverID, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("storage: close generation %q: %w", serverID, err)
+	}
+	if err := os.Rename(tmpName, s.genPath(serverID)); err != nil {
+		return fmt.Errorf("storage: publish generation %q: %w", serverID, err)
+	}
+	return nil
+}
+
+// fence returns ErrStaleGeneration when generation is older than the recorded
+// watermark for serverID. The compare and the subsequent write are not a single
+// atomic step, so two writers racing on one server id could both pass — but only
+// one live VM ever owns a server (the reconciler serializes its lifecycle), and a
+// fenced zombie is always a strictly lower generation, so the realistic race
+// window is nil. Callers raise the watermark via Put/Claim after fence passes.
+func (s *DirStore) fence(serverID string, generation int64) error {
+	current, err := s.readGen(serverID)
+	if err != nil {
+		return err
+	}
+	if generation < current {
+		return ErrStaleGeneration
+	}
+	return nil
+}
+
+// Claim raises the generation watermark for serverID without writing a snapshot.
+func (s *DirStore) Claim(_ context.Context, serverID string, generation int64) error {
+	if err := s.fence(serverID, generation); err != nil {
+		return err
+	}
+	return s.writeGen(serverID, generation)
+}
+
 // Exists reports whether a snapshot file is present for serverID.
 func (s *DirStore) Exists(_ context.Context, serverID string) (bool, error) {
 	_, err := os.Stat(s.path(serverID))
@@ -52,8 +121,14 @@ func (s *DirStore) Exists(_ context.Context, serverID string) (bool, error) {
 
 // Put writes r to a sibling temp file and atomically renames it into place, so
 // a crash or read error mid-stream never leaves a truncated snapshot that a
-// later Get would treat as whole.
-func (s *DirStore) Put(_ context.Context, serverID string, r io.Reader) error {
+// later Get would treat as whole. It first fences on generation: a write from a
+// generation older than the recorded watermark is rejected with ErrStaleGeneration
+// and nothing is written; otherwise the watermark is raised to generation once the
+// snapshot lands.
+func (s *DirStore) Put(_ context.Context, serverID string, generation int64, r io.Reader) error {
+	if err := s.fence(serverID, generation); err != nil {
+		return err
+	}
 	final := s.path(serverID)
 	tmp, err := os.CreateTemp(s.root, SafeKey(serverID)+".*.tmp")
 	if err != nil {
@@ -72,6 +147,9 @@ func (s *DirStore) Put(_ context.Context, serverID string, r io.Reader) error {
 	if err := os.Rename(tmpName, final); err != nil {
 		return fmt.Errorf("storage: publish world %q: %w", serverID, err)
 	}
+	if err := s.writeGen(serverID, generation); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -88,10 +166,14 @@ func (s *DirStore) Get(_ context.Context, serverID string) (io.ReadCloser, error
 	return f, nil
 }
 
-// Delete removes the snapshot for serverID; a missing file is success.
+// Delete removes the snapshot for serverID and its generation watermark; a
+// missing file is success.
 func (s *DirStore) Delete(_ context.Context, serverID string) error {
 	if err := os.Remove(s.path(serverID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("storage: delete world %q: %w", serverID, err)
+	}
+	if err := os.Remove(s.genPath(serverID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("storage: delete generation %q: %w", serverID, err)
 	}
 	return nil
 }

@@ -21,7 +21,7 @@ func (f fakeLister) ListActiveIDs(context.Context) ([]string, error) { return f.
 
 func seedWorld(t *testing.T, s storage.WorldStore, id string) {
 	t.Helper()
-	if err := s.Put(context.Background(), id, bytes.NewReader([]byte("w"))); err != nil {
+	if err := s.Put(context.Background(), id, 1, bytes.NewReader([]byte("w"))); err != nil {
 		t.Fatalf("seed %s: %v", id, err)
 	}
 }

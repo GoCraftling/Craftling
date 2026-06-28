@@ -106,6 +106,92 @@ func TestReconcileBackoffGate(t *testing.T) {
 	}
 }
 
+// TestNextGeneration verifies the per-server incarnation counter bumps
+// monotonically (P8b fencing token).
+func TestNextGeneration(t *testing.T) {
+	ctx := context.Background()
+	repo := repository.NewGameServerRepository(pool)
+	owner := reliabilityUser(t, ctx)
+	s := makeServer(t, ctx, repo, owner, model.StatusPending)
+
+	if s.Generation != 0 {
+		t.Fatalf("fresh server generation = %d, want 0", s.Generation)
+	}
+	g1, err := repo.NextGeneration(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("next generation: %v", err)
+	}
+	g2, err := repo.NextGeneration(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("next generation: %v", err)
+	}
+	if g1 != 1 || g2 != 2 {
+		t.Fatalf("generations = %d, %d; want 1, 2", g1, g2)
+	}
+	got, _ := repo.GetByID(ctx, s.ID)
+	if got.Generation != 2 {
+		t.Fatalf("persisted generation = %d, want 2", got.Generation)
+	}
+}
+
+// TestFenceRepository verifies the orphan fence table CRUD + GC (P8b).
+func TestFenceRepository(t *testing.T) {
+	ctx := context.Background()
+	repo := repository.NewFenceRepository(pool)
+
+	f := model.FencedVM{ServerID: "fs-" + uuid.NewString()[:8], HostID: "h-" + uuid.NewString()[:8], VMID: "vm-" + uuid.NewString()[:8], Generation: 3}
+	if err := repo.Add(ctx, f); err != nil {
+		t.Fatalf("add fence: %v", err)
+	}
+	// Re-adding the same (host, vm) is idempotent.
+	if err := repo.Add(ctx, f); err != nil {
+		t.Fatalf("re-add fence: %v", err)
+	}
+
+	list, err := repo.List(ctx)
+	if err != nil {
+		t.Fatalf("list fences: %v", err)
+	}
+	var found *model.FencedVM
+	for i := range list {
+		if list[i].HostID == f.HostID && list[i].VMID == f.VMID {
+			found = &list[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("added fence not found in List")
+	}
+	if found.ServerID != f.ServerID || found.Generation != 3 {
+		t.Fatalf("fence round-trip mismatch: %+v", found)
+	}
+
+	if err := repo.Delete(ctx, f.HostID, f.VMID); err != nil {
+		t.Fatalf("delete fence: %v", err)
+	}
+	// Delete is idempotent.
+	if err := repo.Delete(ctx, f.HostID, f.VMID); err != nil {
+		t.Fatalf("re-delete fence: %v", err)
+	}
+	list, _ = repo.List(ctx)
+	for i := range list {
+		if list[i].HostID == f.HostID && list[i].VMID == f.VMID {
+			t.Fatal("fence still present after delete")
+		}
+	}
+
+	// DeleteOlderThan sweeps nothing newer than the cutoff and reports a count.
+	g := model.FencedVM{ServerID: "fs-gc", HostID: "h-gc-" + uuid.NewString()[:8], VMID: "vm-gc", Generation: 1}
+	if err := repo.Add(ctx, g); err != nil {
+		t.Fatalf("add gc fence: %v", err)
+	}
+	if n, err := repo.DeleteOlderThan(ctx, time.Now().Add(-time.Hour)); err != nil || n != 0 {
+		t.Fatalf("DeleteOlderThan(recent) = %d, %v; want 0, nil", n, err)
+	}
+	if n, err := repo.DeleteOlderThan(ctx, time.Now().Add(time.Hour)); err != nil || n < 1 {
+		t.Fatalf("DeleteOlderThan(future) = %d, %v; want >=1, nil", n, err)
+	}
+}
+
 // TestReconcileBackoffResetOnSuccess verifies a successful transition clears the
 // attempt counter and retry time (P8a).
 func TestReconcileBackoffResetOnSuccess(t *testing.T) {

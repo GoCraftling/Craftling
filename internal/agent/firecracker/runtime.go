@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,12 +132,19 @@ func (r *Runtime) snapshotSweep(interval time.Duration) {
 		case <-ticker.C:
 			for _, m := range r.snapshotCandidates() {
 				ctx, cancel := context.WithTimeout(context.Background(), snapshotDeadline)
-				if err := r.snapshotRunning(ctx, m); err != nil {
-					r.cfg.Logger.Warn("periodic world snapshot failed",
-						zap.String("vm", m.id), zap.String("server", m.serverID), zap.Error(err))
-				} else {
+				switch err := r.snapshotRunning(ctx, m); {
+				case err == nil:
 					r.cfg.Logger.Debug("periodic world snapshot taken",
 						zap.String("vm", m.id), zap.String("server", m.serverID))
+				case errors.Is(err, storage.ErrStaleGeneration):
+					// This VM has been fenced: a higher-generation incarnation owns the
+					// world now (this host was presumed dead and the server rescheduled).
+					// Dropping the write is the fence working as intended, not a fault.
+					r.cfg.Logger.Debug("periodic world snapshot fenced; VM superseded",
+						zap.String("vm", m.id), zap.String("server", m.serverID))
+				default:
+					r.cfg.Logger.Warn("periodic world snapshot failed",
+						zap.String("vm", m.id), zap.String("server", m.serverID), zap.Error(err))
 				}
 				cancel()
 			}
@@ -244,7 +252,7 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 			worldKey = id
 		}
 		wd := r.cfg.worldDiskPath(worldKey)
-		if err := r.prepareWorldDisk(ctx, worldKey, wd); err != nil {
+		if err := r.prepareWorldDisk(ctx, worldKey, spec.Generation, wd); err != nil {
 			r.releaseNet(vmnet)
 			_ = os.RemoveAll(dir)
 			return nil, fmt.Errorf("firecracker: world disk: %w", err)
@@ -289,6 +297,7 @@ func (r *Runtime) Provision(ctx context.Context, spec agent.VMSpec) (*agent.VM, 
 		tapName:     tapNameFor(id),
 		worldDisk:   worldDisk,
 		worldKey:    worldKey,
+		generation:  spec.Generation,
 		vsockUDS:    vsockUDS,
 		dp:          r.dp,
 		net:         vmnet,
@@ -372,7 +381,7 @@ func (r *Runtime) Stop(ctx context.Context, vmID string) error {
 	// returned, not swallowed: the stop succeeded but the world wasn't saved,
 	// and the reconciler should retry rather than silently risk data loss.
 	if r.store != nil && m.worldDisk != "" {
-		if err := snapshotWorldDisk(ctx, r.store, m.worldKey, m.worldDisk); err != nil {
+		if err := snapshotWorldDisk(ctx, r.store, m.worldKey, m.generation, m.worldDisk); err != nil {
 			return fmt.Errorf("firecracker: snapshot world on stop: %w", err)
 		}
 	}
@@ -455,8 +464,16 @@ func (r *Runtime) Status(_ context.Context, vmID string) (*agent.VM, error) {
 // a world store holds a snapshot for this server it restores that (the
 // reschedule / re-create path); otherwise it formats a fresh empty disk. A
 // restored image already carries an ext4, so no mkfs is needed.
-func (r *Runtime) prepareWorldDisk(ctx context.Context, serverID, diskPath string) error {
+func (r *Runtime) prepareWorldDisk(ctx context.Context, serverID string, generation int64, diskPath string) error {
 	if r.store != nil {
+		// Claim the generation first, so this fresh incarnation raises the store's
+		// watermark before it ever boots — any lower-generation zombie write is then
+		// fenced out (P8b). A stale claim means a newer incarnation already exists,
+		// so this provision is itself doomed; surface it rather than boot a VM that
+		// can't persist.
+		if err := r.store.Claim(ctx, serverID, generation); err != nil {
+			return fmt.Errorf("claim world generation: %w", err)
+		}
 		ok, err := r.store.Exists(ctx, serverID)
 		if err != nil {
 			return fmt.Errorf("check world store: %w", err)

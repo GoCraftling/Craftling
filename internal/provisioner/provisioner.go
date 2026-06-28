@@ -58,6 +58,13 @@ type Provisioner interface {
 	// world, so the server can be rescheduled onto another host on its next
 	// start. It must be idempotent.
 	Evict(ctx context.Context, s *model.GameServer) error
+	// EvictVM is Evict addressed directly to a (host, vm) rather than via a server
+	// record. It backs orphan fencing (P8b): the reconciler reclaims a VM that was
+	// abandoned on a presumed-dead host once the host is reachable again, by which
+	// point the server's record points at a new incarnation elsewhere. Like Evict
+	// it preserves the durable world (which the new incarnation now owns) and must
+	// be idempotent.
+	EvictVM(ctx context.Context, hostID, vmID string) error
 	// Deprovision tears down the backing VM, including its durable world. It must
 	// be idempotent.
 	Deprovision(ctx context.Context, s *model.GameServer) error
@@ -119,6 +126,9 @@ func (Fake) Stop(_ context.Context, _ *model.GameServer) error { return nil }
 // Evict is a no-op for the fake backend; there is no host-local footprint to
 // release.
 func (Fake) Evict(_ context.Context, _ *model.GameServer) error { return nil }
+
+// EvictVM is a no-op for the fake backend; there is no real VM to reclaim.
+func (Fake) EvictVM(_ context.Context, _, _ string) error { return nil }
 
 // Deprovision is a no-op for the fake backend.
 func (Fake) Deprovision(_ context.Context, _ *model.GameServer) error { return nil }

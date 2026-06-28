@@ -52,11 +52,12 @@ func (p *RemoteProvisioner) Provision(ctx context.Context, s *model.GameServer) 
 		return nil, err
 	}
 	spec := agent.VMSpec{
-		ServerID: s.ID,
-		Game:     s.Game,
-		Version:  s.Version,
-		CPUs:     s.CPUs,
-		MemoryMB: s.MemoryMB,
+		ServerID:   s.ID,
+		Game:       s.Game,
+		Version:    s.Version,
+		CPUs:       s.CPUs,
+		MemoryMB:   s.MemoryMB,
+		Generation: s.Generation,
 	}
 	// A template-launched server carries an authoritative image and a resolved
 	// environment; pass both so the agent boots the chosen image and the guest
@@ -112,6 +113,16 @@ func (p *RemoteProvisioner) Evict(ctx context.Context, s *model.GameServer) erro
 		return nil
 	}
 	return p.cmd.Evict(ctx, *s.HostID, *s.VMID)
+}
+
+// EvictVM reclaims an orphaned VM directly on a (host, vm), preserving the
+// durable world (idempotent). It backs P8b fence draining, where the server
+// record no longer points at this host/VM. An empty host or VM is a no-op.
+func (p *RemoteProvisioner) EvictVM(ctx context.Context, hostID, vmID string) error {
+	if hostID == "" || vmID == "" {
+		return nil
+	}
+	return p.cmd.Evict(ctx, hostID, vmID)
 }
 
 // Deprovision tears down the VM on its host (idempotent). A server that was

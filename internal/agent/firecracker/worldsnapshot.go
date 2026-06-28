@@ -25,7 +25,7 @@ import (
 // snapshotWorldDisk compresses the world disk at diskPath and stores it under
 // serverID. The caller must ensure the VM is not writing the disk (powered off)
 // before calling, or the image may be torn.
-func snapshotWorldDisk(ctx context.Context, store storage.WorldStore, serverID, diskPath string) error {
+func snapshotWorldDisk(ctx context.Context, store storage.WorldStore, serverID string, generation int64, diskPath string) error {
 	f, err := os.Open(diskPath) //nolint:gosec // driver-controlled path
 	if err != nil {
 		return fmt.Errorf("open world disk: %w", err)
@@ -45,7 +45,7 @@ func snapshotWorldDisk(ctx context.Context, store storage.WorldStore, serverID, 
 		_ = pw.CloseWithError(err)
 	}()
 
-	if err := store.Put(ctx, serverID, pr); err != nil {
+	if err := store.Put(ctx, serverID, generation, pr); err != nil {
 		_ = pr.CloseWithError(err) // unblock the goroutine if Put bailed early
 		return fmt.Errorf("store world snapshot: %w", err)
 	}
@@ -85,13 +85,13 @@ func gzipDiskToFile(diskPath, gzPath string) error {
 // gzipDiskToFile) to the store under serverID. The store keeps opaque bytes, so
 // restoreWorldDisk's gunzip reads it back the same way it reads a streamed
 // snapshot.
-func putGzFile(ctx context.Context, store storage.WorldStore, serverID, gzPath string) error {
+func putGzFile(ctx context.Context, store storage.WorldStore, serverID string, generation int64, gzPath string) error {
 	f, err := os.Open(gzPath) //nolint:gosec // driver-controlled path
 	if err != nil {
 		return fmt.Errorf("open snapshot temp: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := store.Put(ctx, serverID, f); err != nil {
+	if err := store.Put(ctx, serverID, generation, f); err != nil {
 		return fmt.Errorf("store world snapshot: %w", err)
 	}
 	return nil

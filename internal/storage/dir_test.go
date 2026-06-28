@@ -27,7 +27,7 @@ func TestDirStoreRoundTrip(t *testing.T) {
 	}
 
 	payload := []byte("a world snapshot")
-	if err := s.Put(ctx, id, bytes.NewReader(payload)); err != nil {
+	if err := s.Put(ctx, id, 1, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if ok, err := s.Exists(ctx, id); err != nil || !ok {
@@ -47,8 +47,9 @@ func TestDirStoreRoundTrip(t *testing.T) {
 		t.Errorf("Get returned %q, want %q", got, payload)
 	}
 
-	// Put replaces the prior snapshot rather than appending.
-	if err := s.Put(ctx, id, strings.NewReader("newer")); err != nil {
+	// Put replaces the prior snapshot rather than appending (same generation is
+	// the same incarnation re-snapshotting, which is allowed).
+	if err := s.Put(ctx, id, 1, strings.NewReader("newer")); err != nil {
 		t.Fatalf("Put replace: %v", err)
 	}
 	rc, _ = s.Get(ctx, id)
@@ -70,6 +71,50 @@ func TestDirStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDirStoreGenerationFence verifies the world-write fence (P8b): a Put or
+// Claim from a generation older than the recorded watermark is rejected with
+// ErrStaleGeneration and does not change the stored world, while an equal or newer
+// generation is accepted and raises the watermark.
+func TestDirStoreGenerationFence(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewDirStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "srv-gen"
+
+	// Generation 2 writes the world and sets the watermark.
+	if err := s.Put(ctx, id, 2, strings.NewReader("gen2")); err != nil {
+		t.Fatalf("Put gen2: %v", err)
+	}
+	// A zombie at generation 1 is fenced out — nothing is written.
+	if err := s.Put(ctx, id, 1, strings.NewReader("zombie")); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("Put gen1 = %v; want ErrStaleGeneration", err)
+	}
+	rc, _ := s.Get(ctx, id)
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(got) != "gen2" {
+		t.Errorf("world after fenced write = %q, want %q", got, "gen2")
+	}
+
+	// A Claim at a lower generation is likewise rejected (a downgrade).
+	if err := s.Claim(ctx, id, 1); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("Claim gen1 = %v; want ErrStaleGeneration", err)
+	}
+	// Claiming a higher generation raises the watermark, fencing out gen 2.
+	if err := s.Claim(ctx, id, 3); err != nil {
+		t.Fatalf("Claim gen3: %v", err)
+	}
+	if err := s.Put(ctx, id, 2, strings.NewReader("stale")); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("Put gen2 after claim 3 = %v; want ErrStaleGeneration", err)
+	}
+	// The current incarnation (gen 3) may still write.
+	if err := s.Put(ctx, id, 3, strings.NewReader("gen3")); err != nil {
+		t.Fatalf("Put gen3: %v", err)
+	}
+}
+
 // TestDirStoreKeyIsContained checks an adversarial server id can't write outside
 // the store root.
 func TestDirStoreKeyIsContained(t *testing.T) {
@@ -78,16 +123,19 @@ func TestDirStoreKeyIsContained(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(context.Background(), "../../escape", strings.NewReader("x")); err != nil {
+	if err := s.Put(context.Background(), "../../escape", 1, strings.NewReader("x")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// The blob lands directly under root, name sanitized — nothing escaped.
+	// The blob and its generation sidecar land directly under root, names sanitized
+	// — nothing escaped.
 	entries, _ := os.ReadDir(root)
-	if len(entries) != 1 {
-		t.Fatalf("want 1 entry under root, got %d", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries under root (.world + .gen), got %d", len(entries))
 	}
-	if strings.ContainsRune(entries[0].Name(), os.PathSeparator) {
-		t.Errorf("entry name has a separator: %q", entries[0].Name())
+	for _, e := range entries {
+		if strings.ContainsRune(e.Name(), os.PathSeparator) {
+			t.Errorf("entry name has a separator: %q", e.Name())
+		}
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "escape.world")); err == nil {
 		t.Error("an escaped blob was written outside the store root")
@@ -102,7 +150,7 @@ func TestDirStorePutNoPartialOnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(context.Background(), "srv", errReader{}); err == nil {
+	if err := s.Put(context.Background(), "srv", 1, errReader{}); err == nil {
 		t.Fatal("expected Put to fail on a reader error")
 	}
 	if ok, _ := s.Exists(context.Background(), "srv"); ok {
@@ -134,7 +182,7 @@ func TestDirStoreList(t *testing.T) {
 	}
 
 	for _, id := range []string{"a", "b", "tenant/c"} { // last one is sanitized
-		if err := s.Put(ctx, id, strings.NewReader("x")); err != nil {
+		if err := s.Put(ctx, id, 1, strings.NewReader("x")); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -139,7 +139,8 @@ func main() {
 	// player repo feeds each running server's whitelist over RCON.
 	billingRepo := repository.NewBillingRepository(pool)
 	playerRepo := repository.NewPlayerRepository(pool)
-	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, hostDeadTTL, reconcileBackoffBase, reconcileBackoffMax, zlog)
+	fenceRepo := repository.NewFenceRepository(pool)
+	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, fenceRepo, hostDeadTTL, reconcileBackoffBase, reconcileBackoffMax, zlog)
 	go rec.Run(ctx, reconcileInterval)
 
 	// If a durable world store is configured, periodically GC snapshots that no

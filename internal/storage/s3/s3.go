@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/aarani/craftling-go/internal/storage"
@@ -90,9 +91,73 @@ func New(ctx context.Context, cfg Config) (*S3Store, error) {
 	return &S3Store{client: client, bucket: cfg.Bucket, prefix: cfg.Prefix}, nil
 }
 
-// key derives the object key for a server id.
+// key derives the snapshot object key for a server id.
 func (s *S3Store) key(serverID string) string {
 	return s.prefix + storage.SafeKey(serverID) + storage.WorldSuffix
+}
+
+// genKey derives the generation-watermark object key for a server id.
+func (s *S3Store) genKey(serverID string) string {
+	return s.prefix + storage.SafeKey(serverID) + storage.GenSuffix
+}
+
+// readGen returns the recorded generation watermark for serverID, or 0 when no
+// watermark object exists yet.
+func (s *S3Store) readGen(ctx context.Context, serverID string) (int64, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, s.genKey(serverID), minio.GetObjectOptions{})
+	if err != nil {
+		if isNotFound(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("storage/s3: get generation %q: %w", serverID, err)
+	}
+	defer func() { _ = obj.Close() }()
+	b, err := io.ReadAll(obj)
+	if err != nil {
+		if isNotFound(err) {
+			return 0, nil // lazy GetObject surfaces a missing object on read
+		}
+		return 0, fmt.Errorf("storage/s3: read generation %q: %w", serverID, err)
+	}
+	g, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("storage/s3: parse generation %q: %w", serverID, err)
+	}
+	return g, nil
+}
+
+// writeGen records the generation watermark for serverID.
+func (s *S3Store) writeGen(ctx context.Context, serverID string, generation int64) error {
+	body := strconv.FormatInt(generation, 10)
+	_, err := s.client.PutObject(ctx, s.bucket, s.genKey(serverID),
+		strings.NewReader(body), int64(len(body)), minio.PutObjectOptions{ContentType: "text/plain"})
+	if err != nil {
+		return fmt.Errorf("storage/s3: put generation %q: %w", serverID, err)
+	}
+	return nil
+}
+
+// fence returns ErrStaleGeneration when generation is older than the recorded
+// watermark for serverID. As with the DirStore the read-compare-write is not
+// atomic, but only one live VM owns a server and a fenced zombie is always a
+// strictly lower generation, so the realistic race window is nil.
+func (s *S3Store) fence(ctx context.Context, serverID string, generation int64) error {
+	current, err := s.readGen(ctx, serverID)
+	if err != nil {
+		return err
+	}
+	if generation < current {
+		return storage.ErrStaleGeneration
+	}
+	return nil
+}
+
+// Claim raises the generation watermark for serverID without writing a snapshot.
+func (s *S3Store) Claim(ctx context.Context, serverID string, generation int64) error {
+	if err := s.fence(ctx, serverID, generation); err != nil {
+		return err
+	}
+	return s.writeGen(ctx, serverID, generation)
 }
 
 // Exists reports whether a snapshot object is present for serverID.
@@ -111,12 +176,18 @@ func (s *S3Store) Exists(ctx context.Context, serverID string) (bool, error) {
 // unknown ahead of time (the gzip stream), so we pass -1, which makes minio-go
 // upload via multipart; a failure aborts the upload rather than leaving a
 // truncated object.
-func (s *S3Store) Put(ctx context.Context, serverID string, r io.Reader) error {
+func (s *S3Store) Put(ctx context.Context, serverID string, generation int64, r io.Reader) error {
+	if err := s.fence(ctx, serverID, generation); err != nil {
+		return err
+	}
 	_, err := s.client.PutObject(ctx, s.bucket, s.key(serverID), r, -1, minio.PutObjectOptions{
 		ContentType: "application/gzip",
 	})
 	if err != nil {
 		return fmt.Errorf("storage/s3: put world %q: %w", serverID, err)
+	}
+	if err := s.writeGen(ctx, serverID, generation); err != nil {
+		return err
 	}
 	return nil
 }
@@ -140,11 +211,16 @@ func (s *S3Store) Get(ctx context.Context, serverID string) (io.ReadCloser, erro
 	return obj, nil
 }
 
-// Delete removes the snapshot object; a missing object is success.
+// Delete removes the snapshot object and its generation watermark; a missing
+// object is success.
 func (s *S3Store) Delete(ctx context.Context, serverID string) error {
 	err := s.client.RemoveObject(ctx, s.bucket, s.key(serverID), minio.RemoveObjectOptions{})
 	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("storage/s3: delete world %q: %w", serverID, err)
+	}
+	gerr := s.client.RemoveObject(ctx, s.bucket, s.genKey(serverID), minio.RemoveObjectOptions{})
+	if gerr != nil && !isNotFound(gerr) {
+		return fmt.Errorf("storage/s3: delete generation %q: %w", serverID, gerr)
 	}
 	return nil
 }

@@ -51,6 +51,13 @@ type VMSpec struct {
 	CPUs     int    `json:"cpus"`
 	MemoryMB int    `json:"memory_mb"`
 
+	// Generation is this VM incarnation's fencing token (P8b): the control plane
+	// bumps it on every fresh provision and the driver stamps it onto every durable
+	// world-store write, so a partitioned host's zombie VM (an older generation)
+	// cannot clobber the world a rescheduled, higher-generation VM now owns. Zero
+	// on backends/paths that don't fence (the fake runtime, a store-less host).
+	Generation int64 `json:"generation,omitempty"`
+
 	// ImageRef is the exact OCI image the VM must boot, resolved by the control
 	// plane from a marketplace template. When set the Firecracker driver converts
 	// it instead of its configured FC_IMAGE_REF default; empty falls back to that

@@ -49,6 +49,12 @@ type machine struct {
 	// worldKey is the server-scoped key the world disk and its durable
 	// snapshot (P5b) are stored under. Empty when persistence is disabled.
 	worldKey string
+	// generation is this VM incarnation's fencing token (P8b): the control
+	// plane bumps it on every fresh provision and the driver stamps it onto
+	// every durable world write, so a partitioned host's zombie VM (an older
+	// generation) is rejected by the store and cannot clobber the world a
+	// rescheduled, higher-generation VM now owns.
+	generation int64
 	// vsockUDS, when non-empty, is the host Unix-socket path Firecracker
 	// exposes this VM's vsock on. The host connects to it to reach the guest
 	// snapshot control server (P5c). Empty when live snapshots are disabled.
