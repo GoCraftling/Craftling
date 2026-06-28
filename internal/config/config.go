@@ -31,6 +31,14 @@ type Config struct {
 	// open for the control plane to push VM commands down.
 	GRPCPort string
 
+	// LeaderElection gates the single-writer goroutines (the reconciler and the
+	// reapers) behind a Postgres advisory lock (P8d), so multiple control-plane
+	// replicas behind a load balancer are safe: only the elected leader mutates
+	// compute, while every replica still serves the API and accepts agent streams.
+	// Default true; a single replica trivially wins the lock. Set false to run the
+	// goroutines unconditionally (e.g. a deployment that guarantees one replica).
+	LeaderElection bool
+
 	// TemplateIndexURL is the registry/marketplace index the control plane fetches
 	// the list of game-server templates from.
 	TemplateIndexURL string
@@ -203,6 +211,8 @@ func Load() *Config {
 		AccessTTL:   getDurationEnv("ACCESS_TTL", 15*time.Minute),
 		RefreshTTL:  getDurationEnv("REFRESH_TTL", 30*24*time.Hour),
 		GRPCPort:    getEnv("GRPC_PORT", "8090"),
+
+		LeaderElection: getBoolEnv("LEADER_ELECTION", true),
 
 		TemplateIndexURL: getEnv("TEMPLATE_INDEX_URL", "https://registry.craftling.io/manifest.json"),
 

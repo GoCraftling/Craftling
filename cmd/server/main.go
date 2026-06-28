@@ -15,6 +15,7 @@ import (
 	"github.com/aarani/craftling-go/internal/config"
 	"github.com/aarani/craftling-go/internal/db"
 	"github.com/aarani/craftling-go/internal/handler"
+	"github.com/aarani/craftling-go/internal/leader"
 	applogger "github.com/aarani/craftling-go/internal/logger"
 	"github.com/aarani/craftling-go/internal/provisioner"
 	"github.com/aarani/craftling-go/internal/reaper"
@@ -52,6 +53,14 @@ const (
 	// failing step every reconcileInterval.
 	reconcileBackoffBase = 5 * time.Second
 	reconcileBackoffMax  = 10 * time.Minute
+	// leaderLockKey is the Postgres advisory-lock key the control-plane replicas
+	// contend on to elect the single leader that runs the reconciler and reapers
+	// (P8d). A fixed, distinctive constant — the control plane uses no other
+	// advisory locks, so collision is not a concern.
+	leaderLockKey = 0x6372_6166_746c_30_38 // "craftl08"
+	// leaderRetryInterval is how often a follower replica re-campaigns for
+	// leadership, and so bounds how quickly one takes over after a leader steps down.
+	leaderRetryInterval = 5 * time.Second
 )
 
 func main() {
@@ -122,28 +131,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Periodically purge expired refresh tokens.
-	go reaper.RefreshTokens(ctx, zlog, repository.NewRefreshTokenRepository(pool), reapInterval)
-
-	// Periodically mark hosts down once their heartbeats go stale.
-	go reaper.Hosts(ctx, zlog, hostRepo, hostReapInterval, hostHeartbeatTTL)
-
-	// Continuously reconcile game servers toward their desired state. The
-	// scheduler places unassigned servers onto ready hosts from the same fleet
+	// The scheduler places unassigned servers onto ready hosts from the same fleet
 	// inventory the agent endpoints and host reaper share; the remote provisioner
 	// then drives the VM by calling the assigned host's agent (the control plane
 	// never touches KVM itself).
 	sched := scheduler.New(hostRepo)
 	// The billing meter records each server's running intervals for pay-as-you-go
 	// billing (P9); the reconciler opens/closes them on state transitions. The
-	// player repo feeds each running server's whitelist over RCON.
+	// player repo feeds each running server's whitelist over RCON; the fence repo
+	// records VMs orphaned on unreachable hosts for the reconciler to reclaim (P8b).
 	billingRepo := repository.NewBillingRepository(pool)
 	playerRepo := repository.NewPlayerRepository(pool)
 	fenceRepo := repository.NewFenceRepository(pool)
+	refreshRepo := repository.NewRefreshTokenRepository(pool)
 	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, fenceRepo, hostDeadTTL, reconcileBackoffBase, reconcileBackoffMax, zlog)
-	go rec.Run(ctx, reconcileInterval)
 
-	// If a durable world store is configured, periodically GC snapshots that no
+	// A durable world store, if configured, lets the reconciler GC snapshots no
 	// live server claims (orphans from a host that died before its server was
 	// deprovisioned). The control plane sees the same store the agents do.
 	storeCtx, storeCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -151,8 +154,27 @@ func main() {
 	storeCancel()
 	if err != nil {
 		zlog.Warn("world store unavailable; world GC disabled", zap.Error(err))
-	} else if worldStore != nil {
-		go reaper.Worlds(ctx, zlog, worldStore, gameServerRepo, worldGCInterval)
+	}
+
+	// runLeaderWork starts the single-writer background goroutines — the reconciler
+	// and the reapers — bound to leaderCtx. These must run on exactly one replica:
+	// two reconcilers would race to drive the same VMs. Leadership (P8d) gates them
+	// behind a Postgres advisory lock; every replica still serves the API and the
+	// agent gRPC hub, so agents connect anywhere while only the leader mutates
+	// compute. leaderCtx is cancelled when this replica steps down, stopping them.
+	runLeaderWork := func(leaderCtx context.Context) {
+		go reaper.RefreshTokens(leaderCtx, zlog, refreshRepo, reapInterval)
+		go reaper.Hosts(leaderCtx, zlog, hostRepo, hostReapInterval, hostHeartbeatTTL)
+		go rec.Run(leaderCtx, reconcileInterval)
+		if worldStore != nil {
+			go reaper.Worlds(leaderCtx, zlog, worldStore, gameServerRepo, worldGCInterval)
+		}
+	}
+	if cfg.LeaderElection {
+		go leader.Campaign(ctx, pool, leaderLockKey, leaderRetryInterval, zlog, runLeaderWork)
+	} else {
+		// Single-replica deployment opted out of election: run the work directly.
+		runLeaderWork(ctx)
 	}
 
 	// Serve the agent gRPC link alongside the HTTP API.
