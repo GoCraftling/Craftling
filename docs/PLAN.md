@@ -251,24 +251,51 @@ it is feature-complete for IPv4 TCP/UDP.)*
   (currently only `/healthz` that always returns ok, and `/ping`); make `/healthz`
   a real readiness check (DB + store).
 
-### P8 — Reliability  ⏳ not started
+### P8 — Reliability  ✅ done
 - **Goal:** survive reconcile and host failures.
-- **Retry/backoff:** today a failed reconcile sets `status=error` and just relies
-  on the 2s tick; replace with `attempts` + `next_attempt_at` (exponential
-  backoff) and have `ListReconcilable` respect it.
-- **Host-failure reschedule:** a *stop* now releases a server's host (clears
-  `host_id`, returns the reservation) so its next *start* re-places it on any
-  host — voluntary reschedule works. But the host reaper marks a dead host
-  `down` while **nothing reschedules the servers still desired-running on it**:
-  that involuntary path is the gap. Add: on sustained host-down, clear
-  `host_id`/`vm_id` and re-place, **with fencing** (generation token / ensure the
-  old VM is gone) to avoid split-brain. P5's store-mediated reschedule is the
-  data half; this is the control half.
-- **Draining:** `model.HostDraining` exists but is never entered or honored — wire
-  a drain that blocks new placement and migrates servers off.
-- Optional leader election (advisory lock/lease) for multiple control-plane
-  replicas.
-- **Verify:** kill a host in test → servers rescheduled; error path backs off.
+- **P8a — Retry/backoff.** A failed reconcile no longer flips to `status=error`
+  and retries every 2s tick: `game_servers.attempts` + `next_attempt_at`
+  (migration `00009`) drive exponential backoff (`MarkReconcileFailed`, base
+  doubled per attempt, capped), and `ListReconcilable` skips a server until
+  `next_attempt_at`. A success (`MarkRunning`/`MarkStopped`/`SoftDelete`) or an
+  explicit desired-state change clears the backoff for an immediate retry.
+- **P8b — Host-failure reschedule + fencing.** Involuntary reschedule was already
+  present (the liveness pass drops a running server whose host is unreachable past
+  grace back to `pending` and re-places it); P8b adds the **fencing** that was the
+  real gap, in two complementary halves, **with no proto change**:
+  - *Generation-fenced world writes (data safety).* A monotonic
+    `game_servers.generation` is bumped on every fresh provision
+    (`NextGeneration`), rides down in the `VMSpec`, and the agent stamps it on
+    every durable world write. `WorldStore.Put` now takes a generation and rejects
+    (`ErrStaleGeneration`) any write below the stored watermark; `Claim` raises the
+    watermark at restore/boot so a fresh incarnation fences a partitioned host's
+    lower-generation zombie out of the world before it can snapshot. `DirStore`
+    keeps the watermark in a `.gen` sidecar, `S3Store` in a `.gen` object.
+  - *Orphan teardown (resource reclaim).* When the reconciler presumes a host
+    dead it records a `fenced_vms` row (host, vm, generation) before clearing the
+    VM. A reconcile pass drains the table: once the host is reachable again it
+    `EvictVM`s the orphan (Evict — preserves the durable world the new incarnation
+    now owns — never Deprovision) and clears the fence; stale fences (>24h) are
+    GC'd. A DB table, so fences survive a control-plane restart during the
+    partition. Eviction runs through the reconciler, keeping it the sole writer of
+    compute side effects (rather than the hub tearing down VMs on agent reconnect).
+- **P8c — Draining.** `model.HostDraining` is now wired: `SetDraining`/`Undrain`/
+  `ListDraining` on the host repo (draining survives heartbeats; a down host can't
+  be drained), admin `POST/DELETE /admin/hosts/:id/drain`, and a reconciler drain
+  pass that gracefully migrates each running server off a draining host
+  (Stop→snapshot, Evict, release, `host_id` cleared, dropped to `pending`) so the
+  next tick re-places it on a ready host. `ListReady` already excludes draining
+  hosts, so placement is blocked with no scheduler change.
+- **P8d — Leader election.** `internal/leader.Campaign` holds a Postgres session
+  advisory lock on a dedicated connection; only the leader runs the reconciler +
+  reapers, while every replica still serves the API and the agent gRPC hub. A
+  crashed leader's connection drop frees the lock automatically; followers
+  re-campaign and take over. Gated by `LEADER_ELECTION` (default true).
+- **Verify:** ✅ unit — `backoffDelay`; `DirStore` + S3 (MinIO) generation fence;
+  `reconcileFences` pass (evict-when-reachable / retain-when-gone / retain-on-fail
+  / GC); host drain lifecycle. ✅ e2e — backoff gate + reset; `FenceRepository` CRUD
+  + `NextGeneration`; two-host drain migration + endpoint guards; leader-election
+  mutual exclusion + failover.
 
 ### P9 — Quotas / resource controls + billing  ✅ done
 - **Quotas.** `user_quotas` table (migration `00006`: `max_servers`, `max_cpus`,
@@ -319,9 +346,9 @@ it is feature-complete for IPv4 TCP/UDP.)*
 ## Dependency order
 
 `P0 → P1 → P2 → P3 → P4 → P6` are **done** (compute + player-access path). `P5`
-(done) sits on P3 and gates safe reschedule in P8. `P9` (quotas + billing) is
-**done**. Remaining: `P7`'s metrics work depends on P3 (any time); `P8` depends
-on P2 + P5; `P10` is last and cross-cutting. Housekeeping is independent.
+(done) sits on P3 and gated safe reschedule in `P8` (**done**, built on P2 + P5).
+`P9` (quotas + billing) is **done**. Remaining: `P7`'s metrics work depends on P3
+(any time); `P10` is last and cross-cutting. Housekeeping is independent.
 
 ## Components at a glance
 
@@ -335,6 +362,6 @@ on P2 + P5; `P10` is last and cross-cutting. Housekeeping is independent.
 | P5 | ✅ | — | world disk + overlay; `internal/storage` (`DirStore` + `s3`); `internal/worldstore`; vsock quiesce; `reaper.Worlds` | world disk (host file) + snapshot (store blob); `game_servers.backup_requested/last_backup_at` (`00003`) |
 | P6 | ✅ | — | `firecracker/{nat,tap,tapfilter,netalloc}*`, `bpf/`, `cmd/init/net*` | host/port written back (existing cols) |
 | P7 | 🟡 | `cmd/init` (HEALTH proxy) | `internal/minecraft` (SLP+RCON), firecracker health sweep, vsock `HEALTH`; metrics pending | `game_servers.players_online/players_max/last_seen` (`00005`) |
-| P8 | ⏳ | — | backoff, host-failure reschedule + fencing, draining, leader election | `game_servers.attempts/next_attempt_at` |
+| P8 | ✅ | — | backoff (`MarkReconcileFailed`); generation fence (`storage` watermark, `NextGeneration`) + orphan fencing (`repository.Fence`, reconciler fence pass, `EvictVM`); draining (host repo + reconciler drain pass + admin endpoints); `internal/leader` (pg advisory lock) | `game_servers.attempts/next_attempt_at/generation`, `fenced_vms` (`00009`) |
 | P9 | ✅ | — | quota enforcement (`model.UserQuota`, `repository.Quota`, handler `Create` gate); pay-as-you-go billing (`internal/billing`, `repository.Billing` meter wired into the reconciler) | `user_quotas` (`00006`), `billing_usage` (`00007`) |
 | P10 | ⏳ | — | agent auth, secret fail-fast, jailer/seccomp | per-host agent creds |
