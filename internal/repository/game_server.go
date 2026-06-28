@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/aarani/craftling-go/internal/model"
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ const gameServerColumns = `id, owner_id, name, game, version, cpus, memory_mb,
 	desired_state, status, host_id, vm_id, host, port, status_message,
 	backup_requested, last_backup_at, template_id, image_ref, env,
 	players_online, players_max, last_seen,
+	attempts, next_attempt_at, generation,
 	created_at, updated_at`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows.
@@ -42,6 +44,7 @@ func scanGameServer(row scannable) (*model.GameServer, error) {
 		&s.DesiredState, &s.Status, &s.HostID, &s.VMID, &s.Host, &s.Port, &s.StatusMessage,
 		&s.BackupRequested, &s.LastBackupAt, &s.TemplateID, &s.ImageRef, &envJSON,
 		&s.PlayersOnline, &s.PlayersMax, &s.LastSeen,
+		&s.Attempts, &s.NextAttemptAt, &s.Generation,
 		&s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
@@ -112,6 +115,7 @@ func (r *GameServerRepository) ListReconcilable(ctx context.Context) ([]model.Ga
 	const q = `
 		SELECT ` + gameServerColumns + ` FROM game_servers
 		WHERE deleted_at IS NULL
+		  AND (next_attempt_at IS NULL OR next_attempt_at <= now())
 		  AND (desired_state = 'deleted'
 		   OR backup_requested
 		   OR (desired_state = 'running' AND status <> 'running')
@@ -200,10 +204,13 @@ func (r *GameServerRepository) UpdateSpec(ctx context.Context, id, name, version
 	return err
 }
 
-// SetDesiredState records what the user wants the server to be.
+// SetDesiredState records what the user wants the server to be. It also clears any
+// retry backoff (P8a): an explicit user action — start, stop, delete — is a fresh
+// intent that should be acted on immediately, not held behind a prior failure's
+// exponential delay.
 func (r *GameServerRepository) SetDesiredState(ctx context.Context, id, desired string) error {
 	_, err := r.pool.Exec(ctx,
-		`UPDATE game_servers SET desired_state = $2, updated_at = now() WHERE id = $1`,
+		`UPDATE game_servers SET desired_state = $2, attempts = 0, next_attempt_at = NULL, updated_at = now() WHERE id = $1`,
 		id, desired)
 	return err
 }
@@ -288,12 +295,29 @@ func (r *GameServerRepository) MarkStatus(ctx context.Context, id, status, messa
 	return err
 }
 
+// MarkReconcileFailed records a failed reconcile with exponential backoff (P8a):
+// it flips the server to 'error' with the failure message, sets attempts to the
+// new count, and schedules the next eligible retry at nextAttemptAt. ListReconcilable
+// then skips the server until that time, so a persistently failing server (a bad
+// image, a wedged host) is retried with spacing rather than every tick. A success
+// (MarkRunning/MarkStopped/SoftDelete) or an explicit desired-state change clears
+// both fields back to an immediate-retry state.
+func (r *GameServerRepository) MarkReconcileFailed(ctx context.Context, id, message string, attempts int, nextAttemptAt time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE game_servers
+		SET status = 'error', status_message = NULLIF($2, ''),
+		    attempts = $3, next_attempt_at = $4, updated_at = now()
+		WHERE id = $1`,
+		id, message, attempts, nextAttemptAt)
+	return err
+}
+
 // MarkRunning records a successfully provisioned, running server.
 func (r *GameServerRepository) MarkRunning(ctx context.Context, id, vmID, host string, port int) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
 		SET status = 'running', vm_id = $2, host = $3, port = $4,
-		    status_message = NULL, updated_at = now()
+		    status_message = NULL, attempts = 0, next_attempt_at = NULL, updated_at = now()
 		WHERE id = $1`,
 		id, vmID, host, port)
 	return err
@@ -307,7 +331,7 @@ func (r *GameServerRepository) MarkStopped(ctx context.Context, id string) error
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
 		SET status = 'stopped', vm_id = NULL, host = NULL, port = NULL,
-		    host_id = NULL, status_message = NULL,
+		    host_id = NULL, status_message = NULL, attempts = 0, next_attempt_at = NULL,
 		    players_online = NULL, players_max = NULL, last_seen = NULL, updated_at = now()
 		WHERE id = $1`,
 		id)
@@ -338,7 +362,8 @@ func (r *GameServerRepository) SoftDelete(ctx context.Context, id string) error 
 	_, err := r.pool.Exec(ctx, `
 		UPDATE game_servers
 		SET status = 'deleted', host_id = NULL, vm_id = NULL, host = NULL, port = NULL,
-		    status_message = NULL, players_online = NULL, players_max = NULL, last_seen = NULL,
+		    status_message = NULL, attempts = 0, next_attempt_at = NULL,
+		    players_online = NULL, players_max = NULL, last_seen = NULL,
 		    deleted_at = now(), updated_at = now()
 		WHERE id = $1`,
 		id)

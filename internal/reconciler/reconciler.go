@@ -54,14 +54,20 @@ type Reconciler struct {
 	// before the reconciler presumes the VM dead and reschedules. It must exceed
 	// the heartbeat TTL so a brief agent restart isn't mistaken for a loss.
 	hostDeadAfter time.Duration
+	// backoffBase and backoffMax bound the exponential retry backoff applied to a
+	// server whose reconcile step fails (P8a): the nth consecutive failure waits
+	// min(backoffBase * 2^(n-1), backoffMax) before the server is eligible again.
+	backoffBase time.Duration
+	backoffMax  time.Duration
 }
 
 // New constructs a Reconciler. hostDeadAfter is the grace a running server's host
 // gets to come back before its VM is presumed dead (see Reconciler.hostDeadAfter).
+// backoffBase/backoffMax bound the exponential retry backoff on a failed reconcile.
 // meter may be nil to disable billing metering; whitelist may be nil to disable
 // in-game whitelist sync.
-func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, whitelist WhitelistSource, hostDeadAfter time.Duration, log *zap.Logger) *Reconciler {
-	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, whitelist: whitelist, hostDeadAfter: hostDeadAfter, log: log}
+func New(servers *repository.GameServerRepository, prov provisioner.Provisioner, sched *scheduler.Scheduler, meter Meter, whitelist WhitelistSource, hostDeadAfter, backoffBase, backoffMax time.Duration, log *zap.Logger) *Reconciler {
+	return &Reconciler{servers: servers, prov: prov, sched: sched, meter: meter, whitelist: whitelist, hostDeadAfter: hostDeadAfter, backoffBase: backoffBase, backoffMax: backoffMax, log: log}
 }
 
 // startBilling opens a server's metered running interval (best-effort: a billing
@@ -168,10 +174,47 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	for i := range servers {
 		s := &servers[i]
 		if err := r.reconcile(ctx, s); err != nil {
-			r.log.Error("reconcile server", zap.String("id", s.ID), zap.Error(err))
-			_ = r.servers.MarkStatus(ctx, s.ID, model.StatusError, err.Error())
+			r.backOff(ctx, s, err)
 		}
 	}
+}
+
+// backOff records a failed reconcile and schedules the next retry with exponential
+// backoff (P8a). Instead of flipping the server to 'error' and letting it be
+// re-picked on the very next 2s tick, the nth consecutive failure waits
+// min(backoffBase * 2^(n-1), backoffMax) before ListReconcilable will return it
+// again — so a persistently failing server (a bad image, a wedged host) is retried
+// with widening spacing rather than hammered. A later success or an explicit
+// desired-state change resets the counter.
+func (r *Reconciler) backOff(ctx context.Context, s *model.GameServer, cause error) {
+	attempts := s.Attempts + 1
+	delay := backoffDelay(r.backoffBase, r.backoffMax, attempts)
+	r.log.Error("reconcile server",
+		zap.String("id", s.ID), zap.Int("attempts", attempts),
+		zap.Duration("retry_in", delay), zap.Error(cause))
+	if err := r.servers.MarkReconcileFailed(ctx, s.ID, cause.Error(), attempts, time.Now().Add(delay)); err != nil {
+		r.log.Error("record reconcile failure", zap.String("id", s.ID), zap.Error(err))
+	}
+}
+
+// backoffDelay returns the wait before the nth consecutive failed attempt is
+// retried: base doubled per attempt, capped at max. attempts is 1-based, so the
+// first failure waits base. A non-positive base disables spacing (retry next tick).
+func backoffDelay(base, max time.Duration, attempts int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	delay := base
+	for i := 1; i < attempts; i++ {
+		delay *= 2
+		if delay >= max {
+			return max
+		}
+	}
+	if delay > max {
+		return max
+	}
+	return delay
 }
 
 // checkLiveness re-examines every server we believe is running and asks its

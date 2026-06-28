@@ -45,6 +45,13 @@ const (
 	// worldGCInterval is how often the durable world store is swept for
 	// snapshots belonging to no live server (P5b).
 	worldGCInterval = time.Hour
+	// reconcileBackoffBase and reconcileBackoffMax bound the exponential retry
+	// backoff applied to a server whose reconcile step fails (P8a): the first
+	// failure waits the base, each subsequent failure doubles it, capped at the
+	// max. This spaces out retries on a persistent fault instead of re-running the
+	// failing step every reconcileInterval.
+	reconcileBackoffBase = 5 * time.Second
+	reconcileBackoffMax  = 10 * time.Minute
 )
 
 func main() {
@@ -132,7 +139,7 @@ func main() {
 	// player repo feeds each running server's whitelist over RCON.
 	billingRepo := repository.NewBillingRepository(pool)
 	playerRepo := repository.NewPlayerRepository(pool)
-	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, hostDeadTTL, zlog)
+	rec := reconciler.New(gameServerRepo, prov, sched, billingRepo, playerRepo, hostDeadTTL, reconcileBackoffBase, reconcileBackoffMax, zlog)
 	go rec.Run(ctx, reconcileInterval)
 
 	// If a durable world store is configured, periodically GC snapshots that no

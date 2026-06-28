@@ -65,6 +65,18 @@ type GameServer struct {
 	Port          *int    `json:"port,omitempty"`
 	StatusMessage *string `json:"status_message,omitempty"`
 
+	// Reliability bookkeeping (P8). Attempts counts consecutive failed reconciles
+	// and NextAttemptAt is when the server is next eligible to retry (nil = now);
+	// together they back exponential retry backoff so a persistently failing
+	// server isn't hammered every tick. Both reset to zero/nil on a successful
+	// transition or an explicit desired-state change. Generation is a monotonic
+	// per-server incarnation counter, bumped each time the reconciler provisions a
+	// fresh VM; it fences a partitioned host's zombie VM (an older generation) out
+	// of the durable world it no longer owns.
+	Attempts      int        `json:"attempts"`
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	Generation    int64      `json:"generation"`
+
 	// BackupRequested is a user-set flag asking for an on-demand world snapshot
 	// (P5). The reconciler — the sole writer of compute side effects — performs
 	// the snapshot via the agent, then clears the flag and stamps LastBackupAt.

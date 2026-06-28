@@ -69,6 +69,34 @@ func TestHealthNeedsWrite(t *testing.T) {
 	}
 }
 
+func TestBackoffDelay(t *testing.T) {
+	base := time.Second
+	max := 30 * time.Second
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{1, time.Second},      // first failure waits the base
+		{2, 2 * time.Second},  // doubles
+		{3, 4 * time.Second},  // doubles
+		{4, 8 * time.Second},  // doubles
+		{5, 16 * time.Second}, // doubles
+		{6, 30 * time.Second}, // would be 32s, capped at max
+		{7, 30 * time.Second}, // stays capped
+		{20, 30 * time.Second},
+	}
+	for _, c := range cases {
+		if got := backoffDelay(base, max, c.attempts); got != c.want {
+			t.Errorf("backoffDelay(attempts=%d) = %s, want %s", c.attempts, got, c.want)
+		}
+	}
+
+	// A non-positive base disables spacing entirely (retry on the next tick).
+	if got := backoffDelay(0, max, 3); got != 0 {
+		t.Errorf("backoffDelay with zero base = %s, want 0", got)
+	}
+}
+
 func TestEqIntPtr(t *testing.T) {
 	a, b := 1, 1
 	cases := []struct {
