@@ -203,6 +203,54 @@ func (r *HostRepository) Release(_ context.Context, id string, cpus, memMB int) 
 	return nil
 }
 
+// SetDraining puts a ready host into the draining state (P8c): it accepts no new
+// placements (ListReady excludes it) and the reconciler migrates its servers off.
+// Idempotent for an already-draining host. Returns ErrNotFound for an unknown id
+// or ErrHostNotReady for a host that is down (a down host's servers reschedule via
+// the failure path, not a drain).
+func (r *HostRepository) SetDraining(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	h, ok := r.hosts[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if h.Status == model.HostDown {
+		return ErrHostNotReady
+	}
+	if h.Status != model.HostDraining {
+		h.Status = model.HostDraining
+		h.UpdatedAt = now()
+	}
+	return nil
+}
+
+// Undrain returns a draining host to ready so it accepts placements again.
+// Idempotent for a host that is not draining; ErrNotFound for an unknown id.
+func (r *HostRepository) Undrain(_ context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	h, ok := r.hosts[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if h.Status == model.HostDraining {
+		h.Status = model.HostReady
+		h.UpdatedAt = now()
+	}
+	return nil
+}
+
+// ListDraining returns the hosts currently draining (P8c). The reconciler uses it
+// to find servers it must migrate off.
+func (r *HostRepository) ListDraining(_ context.Context) ([]model.Host, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.snapshot(func(h *model.Host) bool { return h.Status == model.HostDraining }), nil
+}
+
 // MarkDown marks a single host down, the immediate counterpart to MarkStale:
 // the hub calls it the moment an agent's stream drops, so a disconnected host
 // stops being scheduled without waiting for its heartbeat TTL to lapse. An

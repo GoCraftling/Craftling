@@ -98,3 +98,67 @@ func TestRegisterDefaultsAllocatableToTotal(t *testing.T) {
 		t.Fatalf("allocatable = %d/%d, want 4/4096", h.CPUsAllocatable, h.MemoryMBAllocatable)
 	}
 }
+
+// TestDrainLifecycle verifies the P8c host draining transitions: a ready host can
+// be drained (then it drops out of ListReady and into ListDraining), a heartbeat
+// does not undo draining, undrain returns it to ready, and a down host cannot be
+// drained.
+func TestDrainLifecycle(t *testing.T) {
+	ctx := context.Background()
+	repo := NewHostRepository()
+	if _, err := repo.Register(ctx, newHost("a", 4, 4096)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if err := repo.SetDraining(ctx, "a"); err != nil {
+		t.Fatalf("set draining: %v", err)
+	}
+	h, _ := repo.GetByID(ctx, "a")
+	if h.Status != model.HostDraining {
+		t.Fatalf("status = %q, want draining", h.Status)
+	}
+	if ready, _ := repo.ListReady(ctx); len(ready) != 0 {
+		t.Errorf("draining host still in ListReady: %v", ready)
+	}
+	if drn, _ := repo.ListDraining(ctx); len(drn) != 1 || drn[0].ID != "a" {
+		t.Errorf("ListDraining = %v, want [a]", drn)
+	}
+
+	// A heartbeat keeps a draining host draining (only a down host is un-downed).
+	if err := repo.Heartbeat(ctx, "a"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	h, _ = repo.GetByID(ctx, "a")
+	if h.Status != model.HostDraining {
+		t.Errorf("heartbeat changed status to %q; want draining preserved", h.Status)
+	}
+
+	// SetDraining is idempotent.
+	if err := repo.SetDraining(ctx, "a"); err != nil {
+		t.Fatalf("re-drain: %v", err)
+	}
+
+	if err := repo.Undrain(ctx, "a"); err != nil {
+		t.Fatalf("undrain: %v", err)
+	}
+	h, _ = repo.GetByID(ctx, "a")
+	if h.Status != model.HostReady {
+		t.Fatalf("after undrain status = %q, want ready", h.Status)
+	}
+
+	// A down host cannot be drained.
+	if err := repo.MarkDown(ctx, "a"); err != nil {
+		t.Fatalf("mark down: %v", err)
+	}
+	if err := repo.SetDraining(ctx, "a"); err != ErrHostNotReady {
+		t.Fatalf("drain down host = %v, want ErrHostNotReady", err)
+	}
+
+	// Draining/undraining an unknown host is a not-found.
+	if err := repo.SetDraining(ctx, "nope"); err != ErrNotFound {
+		t.Errorf("drain unknown = %v, want ErrNotFound", err)
+	}
+	if err := repo.Undrain(ctx, "nope"); err != ErrNotFound {
+		t.Errorf("undrain unknown = %v, want ErrNotFound", err)
+	}
+}

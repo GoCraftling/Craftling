@@ -181,6 +181,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	// Reclaim VMs orphaned on hosts that have since come back (P8b fencing).
 	r.reconcileFences(ctx)
 
+	// Migrate servers off any host an operator put into draining (P8c).
+	r.drainHosts(ctx)
+
 	servers, err := r.servers.ListReconcilable(ctx)
 	if err != nil {
 		r.log.Error("list reconcilable servers", zap.Error(err))
@@ -426,6 +429,64 @@ func (r *Reconciler) reconcileFences(ctx context.Context) {
 		r.log.Info("fenced orphan VM evicted",
 			zap.String("server_id", f.ServerID), zap.String("host_id", f.HostID), zap.String("vm_id", f.VMID))
 	}
+}
+
+// drainHosts migrates every running server off each draining host (P8c). A
+// draining host already takes no new placements (ListReady excludes it); this is
+// the shedding half. Each server is moved gracefully — its world is snapshotted to
+// the durable store and its capacity released — then dropped to pending so the
+// next tick re-places it on a ready host (its world restored there). Best-effort:
+// a per-server failure is logged and retried on the next sweep.
+func (r *Reconciler) drainHosts(ctx context.Context) {
+	hosts, err := r.sched.ListDraining(ctx)
+	if err != nil {
+		r.log.Error("list draining hosts", zap.Error(err))
+		return
+	}
+	for i := range hosts {
+		h := &hosts[i]
+		servers, err := r.servers.ListByHost(ctx, h.ID)
+		if err != nil {
+			r.log.Error("drain: list servers on host", zap.String("host_id", h.ID), zap.Error(err))
+			continue
+		}
+		for j := range servers {
+			if err := r.migrateOff(ctx, &servers[j]); err != nil {
+				r.log.Warn("drain: migrate server off host",
+					zap.String("id", servers[j].ID), zap.String("host_id", h.ID), zap.Error(err))
+			}
+		}
+	}
+}
+
+// migrateOff gracefully evacuates one running server from its host: snapshot the
+// world to the durable store (Stop), evict the host-local footprint, release the
+// reservation, clear the placement, and drop the server to pending. Desired state
+// is untouched — the server still wants to run — so the next tick re-places it on
+// a ready host and restores its world from the store. Mirrors the voluntary-stop
+// path but keeps the server running-desired rather than parking it stopped.
+func (r *Reconciler) migrateOff(ctx context.Context, s *model.GameServer) error {
+	if err := r.prov.Stop(ctx, s); err != nil {
+		return err
+	}
+	if err := r.prov.Evict(ctx, s); err != nil {
+		return err
+	}
+	if s.HostID != nil {
+		_ = r.sched.Release(ctx, *s.HostID, s.CPUs, s.MemoryMB)
+	}
+	if err := r.servers.UnassignHost(ctx, s.ID); err != nil {
+		return err
+	}
+	if err := r.servers.MarkLost(ctx, s.ID, "migrated off draining host"); err != nil {
+		return err
+	}
+	// The VM is gone; stop the billing clock. The re-place on a later tick opens a
+	// fresh interval, so only observed-running time is billed.
+	r.stopBilling(ctx, s.ID)
+	r.log.Info("server migrated off draining host",
+		zap.String("id", s.ID), zap.Stringp("host_id", s.HostID))
+	return nil
 }
 
 // markLost drops a presumed-dead running server back to pending for re-provision,

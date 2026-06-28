@@ -70,3 +70,39 @@ func (h *AdminHandler) ListHosts(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"hosts": hosts})
 }
+
+// DrainHost puts a host into the draining state (P8c): it takes no new placements
+// and the reconciler migrates its running servers off. The endpoint only records
+// the intent — the reconciler, the sole writer of compute side effects, does the
+// migration. Guarded by RequireRole(admin).
+func (h *AdminHandler) DrainHost(c *gin.Context) {
+	if err := h.hosts.SetDraining(c.Request.Context(), c.Param("id")); err != nil {
+		h.writeHostStateErr(c, err, "drain host")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "draining"})
+}
+
+// UndrainHost returns a draining host to ready so it accepts placements again.
+// Guarded by RequireRole(admin).
+func (h *AdminHandler) UndrainHost(c *gin.Context) {
+	if err := h.hosts.Undrain(c.Request.Context(), c.Param("id")); err != nil {
+		h.writeHostStateErr(c, err, "undrain host")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ready"})
+}
+
+// writeHostStateErr maps a host state-change error to an HTTP response: 404 for an
+// unknown host, 409 for a host that can't be drained (it is down), 500 otherwise.
+func (h *AdminHandler) writeHostStateErr(c *gin.Context, err error, op string) {
+	switch {
+	case errors.Is(err, repository.ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "host not found"})
+	case errors.Is(err, repository.ErrHostNotReady):
+		c.JSON(http.StatusConflict, gin.H{"error": "host is down; cannot drain"})
+	default:
+		logger.FromContext(c).Error(op, zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	}
+}

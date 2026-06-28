@@ -25,6 +25,7 @@ var ErrNoCapacity = errors.New("no host with sufficient capacity")
 type hostStore interface {
 	List(ctx context.Context) ([]model.Host, error)
 	ListReady(ctx context.Context) ([]model.Host, error)
+	ListDraining(ctx context.Context) ([]model.Host, error)
 	Reserve(ctx context.Context, id string, cpus, memMB int) error
 	Release(ctx context.Context, id string, cpus, memMB int) error
 }
@@ -85,6 +86,13 @@ func (s *Scheduler) Placeable(ctx context.Context, hostID string) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+// ListDraining returns the hosts currently draining (P8c). The reconciler uses it
+// to find the servers it must migrate off; placement already skips these hosts
+// because they are not ready.
+func (s *Scheduler) ListDraining(ctx context.Context) ([]model.Host, error) {
+	return s.hosts.ListDraining(ctx)
 }
 
 // LastHeartbeat returns when the control plane last heard from a host and

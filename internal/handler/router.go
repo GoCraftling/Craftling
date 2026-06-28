@@ -121,6 +121,10 @@ func NewRouter(cfg *config.Config, log *zap.Logger, pool *pgxpool.Pool, hostRepo
 			admin.GET("/servers", adminHandler.ListServers)
 			admin.GET("/servers/:id/logs", adminHandler.ServerLogs)
 			admin.GET("/hosts", adminHandler.ListHosts)
+			// Take a host out of / back into service (P8c). Draining sheds its
+			// servers onto other hosts; undraining lets it accept placements again.
+			admin.POST("/hosts/:id/drain", adminHandler.DrainHost)
+			admin.DELETE("/hosts/:id/drain", adminHandler.UndrainHost)
 			// Per-user quota view/set (P9). Setting an empty body or an absent
 			// override reverts the user to the system default via DELETE.
 			admin.GET("/users/:id/quota", quotaHandler.GetForUser)

@@ -142,6 +142,21 @@ func (r *GameServerRepository) ListRunning(ctx context.Context) ([]model.GameSer
 	return r.query(ctx, q)
 }
 
+// ListByHost returns the live servers currently running on a host and still
+// wanted up (status 'running', desired 'running'). The reconciler uses it to find
+// which servers to migrate off a draining host (P8c).
+func (r *GameServerRepository) ListByHost(ctx context.Context, hostID string) ([]model.GameServer, error) {
+	const q = `
+		SELECT ` + gameServerColumns + ` FROM game_servers
+		WHERE deleted_at IS NULL
+		  AND host_id = $1
+		  AND status = 'running'
+		  AND desired_state = 'running'
+		ORDER BY updated_at
+		LIMIT 100`
+	return r.query(ctx, q, hostID)
+}
+
 // MarkLost drops a server we believed running back to 'pending' and clears its
 // now-dead VM id, so the reconciler re-provisions it from scratch. It leaves the
 // host assignment untouched: start() re-runs placement only when that host is no

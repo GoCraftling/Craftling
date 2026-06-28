@@ -4,9 +4,11 @@ package e2e
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/aarani/craftling-go/internal/agent"
 	"github.com/aarani/craftling-go/internal/model"
 	"github.com/aarani/craftling-go/internal/repository"
 	"github.com/google/uuid"
@@ -189,6 +191,95 @@ func TestFenceRepository(t *testing.T) {
 	}
 	if n, err := repo.DeleteOlderThan(ctx, time.Now().Add(time.Hour)); err != nil || n < 1 {
 		t.Fatalf("DeleteOlderThan(future) = %d, %v; want >=1, nil", n, err)
+	}
+}
+
+// drainHostID is a stable id for the second host the drain test spins up.
+const drainHostID = "33333333-3333-3333-3333-333333333333"
+
+// TestDrainMigratesServers verifies P8c end to end: with two ready hosts, draining
+// the host a running server landed on migrates that server to the other host (it
+// ends up running again under a different host id), and the drained host reports
+// draining. Undraining restores it to ready.
+func TestDrainMigratesServers(t *testing.T) {
+	ctx := context.Background()
+
+	// Bring up a second host so a drained server has somewhere to migrate to.
+	stop := startAgent(t, agent.LinkInfo{
+		ID:            drainHostID,
+		Hostname:      "drain-host",
+		Zone:          "zone-a",
+		AgentVersion:  "test",
+		CPUsTotal:     placementHostCPUs,
+		MemoryMBTotal: placementHostMemoryMB,
+	})
+	defer stop()
+	if err := waitHostReady(ctx, drainHostID, 10*time.Second); err != nil {
+		t.Fatalf("second host did not register: %v", err)
+	}
+	t.Cleanup(func() { _ = hostRepo.Undrain(ctx, drainHostID); _ = hostRepo.Undrain(ctx, placementHostID) })
+
+	user := registerUser(t, "drain-user-"+uuid.NewString()[:8]+"@example.com", "hunter2pass")
+	admin := makeAdmin(t, "drain-admin-"+uuid.NewString()[:8]+"@example.com", "hunter2pass")
+
+	id := createServerID(t, user.AccessToken, "drain-me")
+	running := waitForStatus(t, user.AccessToken, id, "running")
+	fromHost, _ := running["host_id"].(string)
+	if fromHost == "" {
+		t.Fatal("running server has no host_id")
+	}
+
+	// Drain the host it landed on.
+	resp, _ := doJSON(t, http.MethodPost, "/api/v1/admin/hosts/"+fromHost+"/drain", admin.AccessToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("drain host: status %d", resp.StatusCode)
+	}
+
+	// The server should come back running on a different host.
+	deadline := time.Now().Add(15 * time.Second)
+	var toHost string
+	for time.Now().Before(deadline) {
+		_, body := get(t, "/api/v1/servers/"+id, user.AccessToken)
+		s := decodeServer(t, body)
+		if s["status"] == "running" {
+			if h, _ := s["host_id"].(string); h != "" && h != fromHost {
+				toHost = h
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if toHost == "" {
+		t.Fatalf("server did not migrate off drained host %s", fromHost)
+	}
+
+	// The drained host reports draining; undraining returns it to ready.
+	if h, _ := hostRepo.GetByID(ctx, fromHost); h == nil || h.Status != model.HostDraining {
+		t.Fatalf("drained host status = %v, want draining", h)
+	}
+	resp, _ = doJSON(t, http.MethodDelete, "/api/v1/admin/hosts/"+fromHost+"/drain", admin.AccessToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("undrain host: status %d", resp.StatusCode)
+	}
+
+	// Clean up the server so it doesn't tie up capacity for other tests.
+	doJSON(t, http.MethodDelete, "/api/v1/servers/"+id, user.AccessToken, nil)
+	waitForGone(t, user.AccessToken, id)
+}
+
+// TestDrainEndpointAuthAndErrors covers the drain endpoint's guards: non-admins
+// are rejected and an unknown host is a 404.
+func TestDrainEndpointAuthAndErrors(t *testing.T) {
+	user := registerUser(t, "drain-noadmin-"+uuid.NewString()[:8]+"@example.com", "hunter2pass")
+	admin := makeAdmin(t, "drain-admin2-"+uuid.NewString()[:8]+"@example.com", "hunter2pass")
+
+	resp, _ := doJSON(t, http.MethodPost, "/api/v1/admin/hosts/"+placementHostID+"/drain", user.AccessToken, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-admin drain = %d, want 403", resp.StatusCode)
+	}
+	resp, _ = doJSON(t, http.MethodPost, "/api/v1/admin/hosts/does-not-exist/drain", admin.AccessToken, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("drain unknown host = %d, want 404", resp.StatusCode)
 	}
 }
 
